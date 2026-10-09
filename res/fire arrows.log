@@ -1,0 +1,49 @@
+17:36:03.932 [INFO] [dev.baxlek.fire_arrows] found 'Fire Arrows Standalone' v1.0.2 by baxlek (/data/data/dev.twilitrealm.dusk/files/mods/fire_arrows.dusk)
+17:36:04.481 [INFO] [dev.baxlek.fire_arrows] activating mod
+17:36:04.484 [INFO] [dev.baxlek.fire_arrows] fire_arrows initialized
+17:36:24.114 [INFO] [dev.baxlek.fire_arrows] trackFireArrow: new arrowId=147 assigned ring-buffer slot=0
+17:36:25.818 [INFO] [dev.baxlek.fire_arrows] activateFireArrowIgnition: igniteActive=true for arrowId=147
+17:36:25.916 [INFO] [dev.baxlek.fire_arrows] updateFireArrowEffect: ChkAtHit true, arrowId=147 GetAtHitAc=115
+17:36:25.916 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: actor name=480 id=115
+17:36:25.916 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: using free slot=0
+17:36:26.281 [INFO] [dev.baxlek.fire_arrows] trackFireArrow: address reused, reinitializing slot for new arrowId=149 (was arrowId=147)
+17:36:27.513 [INFO] [dev.baxlek.fire_arrows] activateFireArrowIgnition: igniteActive=true for arrowId=149
+17:36:27.612 [INFO] [dev.baxlek.fire_arrows] updateFireArrowEffect: ChkAtHit true, arrowId=149 GetAtHitAc=115
+17:36:27.612 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: actor name=480 id=115
+17:36:27.612 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: refreshing existing slot=0 oldTimer=99
+17:36:28.018 [INFO] [dev.baxlek.fire_arrows] trackFireArrow: address reused, reinitializing slot for new arrowId=151 (was arrowId=149)
+17:36:29.084 [INFO] [dev.baxlek.fire_arrows] activateFireArrowIgnition: igniteActive=true for arrowId=151
+17:36:29.184 [INFO] [dev.baxlek.fire_arrows] updateFireArrowEffect: ChkAtHit true, arrowId=151 GetAtHitAc=115
+17:36:29.184 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: actor name=480 id=115
+17:36:29.184 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: refreshing existing slot=0 oldTimer=103
+17:36:29.613 [INFO] [dev.baxlek.fire_arrows] trackFireArrow: address reused, reinitializing slot for new arrowId=153 (was arrowId=151)
+17:36:30.714 [INFO] [dev.baxlek.fire_arrows] activateFireArrowIgnition: igniteActive=true for arrowId=153
+17:36:30.813 [INFO] [dev.baxlek.fire_arrows] updateFireArrowEffect: ChkAtHit true, arrowId=153 GetAtHitAc=115
+17:36:30.813 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: actor name=480 id=115
+17:36:30.813 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: refreshing existing slot=0 oldTimer=101
+17:36:31.350 [INFO] [dev.baxlek.fire_arrows] trackFireArrow: address reused, reinitializing slot for new arrowId=155 (was arrowId=153)
+17:36:32.319 [INFO] [dev.baxlek.fire_arrows] activateFireArrowIgnition: igniteActive=true for arrowId=155
+17:36:32.418 [INFO] [dev.baxlek.fire_arrows] updateFireArrowEffect: ChkAtHit true, arrowId=155 GetAtHitAc=115
+17:36:32.418 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: actor name=480 id=115
+17:36:32.418 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: refreshing existing slot=0 oldTimer=102
+17:36:33.683 [INFO] [dev.baxlek.fire_arrows] trackFireArrow: address reused, reinitializing slot for new arrowId=157 (was arrowId=155)
+17:36:34.717 [INFO] [dev.baxlek.fire_arrows] activateFireArrowIgnition: igniteActive=true for arrowId=157
+17:36:34.816 [INFO] [dev.baxlek.fire_arrows] updateFireArrowEffect: ChkAtHit true, arrowId=157 GetAtHitAc=115
+17:36:34.816 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: actor name=480 id=115
+17:36:34.816 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: refreshing existing slot=0 oldTimer=78
+17:36:35.816 [INFO] [dev.baxlek.fire_arrows] trackFireArrow: address reused, reinitializing slot for new arrowId=159 (was arrowId=157)
+17:36:36.751 [INFO] [dev.baxlek.fire_arrows] activateFireArrowIgnition: igniteActive=true for arrowId=159
+17:36:36.850 [INFO] [dev.baxlek.fire_arrows] updateFireArrowEffect: ChkAtHit true, arrowId=159 GetAtHitAc=115
+17:36:36.850 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: actor name=480 id=115
+17:36:36.850 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: refreshing existing slot=0 oldTimer=89
+17:36:37.752 [INFO] [dev.baxlek.fire_arrows] trackFireArrow: address reused, reinitializing slot for new arrowId=161 (was arrowId=159)
+17:36:38.819 [INFO] [dev.baxlek.fire_arrows] activateFireArrowIgnition: igniteActive=true for arrowId=161
+17:36:38.917 [INFO] [dev.baxlek.fire_arrows] updateFireArrowEffect: ChkAtHit true, arrowId=161 GetAtHitAc=115
+17:36:38.918 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: actor name=480 id=115
+17:36:38.918 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: refreshing existing slot=0 oldTimer=88
+17:36:39.818 [INFO] [dev.baxlek.fire_arrows] trackFireArrow: address reused, reinitializing slot for new arrowId=163 (was arrowId=161)
+17:36:40.820 [INFO] [dev.baxlek.fire_arrows] activateFireArrowIgnition: igniteActive=true for arrowId=163
+17:36:40.919 [INFO] [dev.baxlek.fire_arrows] updateFireArrowEffect: ChkAtHit true, arrowId=163 GetAtHitAc=115
+17:36:40.919 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: actor name=480 id=115
+17:36:40.919 [INFO] [dev.baxlek.fire_arrows] igniteBurningActor: refreshing existing slot=0 oldTimer=90
+17:36:45.913 [INFO] [dev.baxlek.fire_arrows] updateBurningActors: actorId=115 burn expired naturally, freeing slot
