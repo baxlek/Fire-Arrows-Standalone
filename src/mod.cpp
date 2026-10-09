@@ -28,11 +28,11 @@ IMPORT_SERVICE(LogService, svc_log);
 // Lets the player mix the Lantern into the Bow's C-button slot, exactly like the vanilla
 // Bow & Hawkeye combo. While the combo is equipped, arrows are lit on the way out by default,
 // igniting whatever they hit the same way the fire arrows shot by Bulblin (Bokoblin) archers do,
-// and whatever actor they hit briefly catches fire too (a purely cosmetic flame - see
-// igniteBurningActor below for why this doesn't also add extra damage over time). Each shot costs
-// the same amount of lantern oil as a single lantern swing. While aiming, the same button press
-// that switches a Bow & Bomb Arrow combo between bomb and normal arrows switches this combo
-// between fire and normal arrows instead.
+// and whatever enemy they hit briefly catches fire too, just like getting hit by one of those
+// archers' own fire arrows (a purely cosmetic flame - see igniteBurningActor below for why this
+// doesn't also add extra damage over time). Each shot costs the same amount of lantern oil as a
+// single lantern swing. While aiming, the same button press that switches a Bow & Bomb Arrow combo
+// between bomb and normal arrows switches this combo between fire and normal arrows instead.
 // --------------------------------------------------------------------------------------------
 
 // dComIfGs_getMixItemIndex() returns this when a C-button slot has no item mixed into it.
@@ -504,7 +504,7 @@ static bool isArrowStationary(daArrow_c* arrow) {
 }
 
 // --------------------------------------------------------------------------------------------
-// Cosmetic "on fire" effect for whatever a fire-combo arrow actually hits.
+// Cosmetic "on fire" effect for enemies hit by a fire-combo arrow.
 //
 // This is deliberately cosmetic-only: it does not deal any extra damage, and does not attempt to
 // replicate the bulblin (bokoblin) archer's own fire arrows making *Link* take periodic burn
@@ -518,6 +518,17 @@ static bool isArrowStationary(daArrow_c* arrow) {
 // not a quiet burn - and since most enemies that die to a single normal arrow hit anyway, extra
 // damage-over-time on top would rarely even matter before they're already dead. A purely visual
 // flame, needing nothing from the target beyond its position, avoids all of that.
+//
+// To actually look like the bulblin archer's own fire arrows, this reuses the exact particle pair
+// (ID_ZI_J_LK_BURNS_A/B) and paired-emitter pattern daAlink_c::setFirePointDamageEffect() uses to
+// set *Link's own body* on fire when he's hit by one (d_a_alink_effect.inc) - the same pair his
+// own wooden (Ordon) shield effect (ID_ZI_J_LK_SH_BURN_A/B, setWoodShieldBurnEffect()) is styled
+// after too - rather than the plain open-flame particle (ID_ZF_J_FIRE02_FIRE) already used for the
+// arrow's own trail above, which reads as a torch/campfire, not a person on fire. Despite the "LK"
+// in the name, this is an ordinary resource out of the common (always-resident) particle archive,
+// not something tied to Link's own actor or model - the same way every other particle ID in this
+// file is just looked up and spawned at an arbitrary world position with dComIfGp_particle_set(),
+// it works identically for any target.
 // --------------------------------------------------------------------------------------------
 
 // How long (in frames, 60 = 1 second) the cosmetic flame keeps burning on a hit target before it
@@ -538,9 +549,22 @@ struct BurningActor {
     // lifecycle at all (unlike the arrow, which this mod itself tracks from nock to impact), so it
     // has no other way to notice the original target was deleted out from under a stale pointer.
     fpc_ProcID actorId = fpcM_ERROR_PROCESS_ID_e;
-    u32 particleKey = 0;
-    // Handed to the emitter via setUserWork() below; must outlive the emitter itself, so it's
-    // stored here rather than as a stack temporary (same reasoning as TrackedFireArrow::velocity).
+    // Where on the target's body the arrow actually struck, relative to its origin
+    // (current.pos, usually the ground-level/root point most actors are positioned by) - captured
+    // once at ignite time from the arrow's own collider (see igniteBurningActor below) so the
+    // flame reads as coming from roughly center-mass/wherever it actually hit, not the ground.
+    // Re-added to the target's current.pos every frame (see updateBurningActors), so the flame
+    // still correctly follows the target around as it moves, same as it would if it were parented
+    // to a bone - just without needing an actual bone matrix, which no shared enemy base class
+    // exposes generically.
+    cXyz hitOffset = {0.0f, 0.0f, 0.0f};
+    // Two emitters per burning actor, matching setFirePointDamageEffect's own A/B pair (one for
+    // the base flame, one for the sparks/embers on top) rather than a single particle.
+    u32 particleKeyA = 0;
+    u32 particleKeyB = 0;
+    // Handed to both emitters via setUserWork() below; must outlive the emitters themselves, so
+    // it's stored here rather than as a stack temporary (same reasoning as
+    // TrackedFireArrow::velocity).
     cXyz velocity = {0.0f, 0.0f, 0.0f};
     // Frames remaining; 0 means the slot is free. Decremented once per updateBurningActors() call
     // (i.e. once per mod_update(), once per game frame).
@@ -555,20 +579,23 @@ static constexpr int MAX_BURNING_ACTORS = 8;
 static BurningActor g_burningActors[MAX_BURNING_ACTORS];
 static int g_nextBurningActorSlot = 0;
 
-// Starts (or refreshes, if already burning) the cosmetic flame on a hit target. Reuses a free slot
-// (timer == 0) if one exists so an actor that's still burning never gets evicted by an unrelated
-// new ignition elsewhere; otherwise evicts the oldest slot in ring-buffer order, exactly like
-// trackFireArrow does for arrows. An evicted slot's particle key is simply abandoned rather than
-// explicitly stopped: like the arrow's own trail particle (see updateFireArrowEffect below), this
-// effect is kept alive purely by being re-issued every frame, so no longer calling
-// dComIfGp_particle_set() for it is already enough for it to stop emitting and fade out on its
-// own - there's no separate "stop" call needed or used anywhere else in this file for the same
-// reason.
-static void igniteBurningActor(fopAc_ac_c* actor) {
+// Starts (or refreshes, if already burning) the cosmetic flame on a hit target, anchored at
+// i_hitPos (the arrow's actual impact point on the target, see updateFireArrowEffect's call site)
+// rather than the target's own current.pos. Reuses a free slot (timer == 0) if one exists so an
+// actor that's still burning never gets evicted by an unrelated new ignition elsewhere; otherwise
+// evicts the oldest slot in ring-buffer order, exactly like trackFireArrow does for arrows. An
+// evicted slot's particle keys are simply abandoned rather than explicitly stopped: like the
+// arrow's own trail particle (see updateFireArrowEffect below), this effect is kept alive purely
+// by being re-issued every frame, so no longer calling dComIfGp_particle_set() for it is already
+// enough for it to stop emitting and fade out on its own - there's no separate "stop" call needed
+// or used anywhere else in this file for the same reason.
+static void igniteBurningActor(fopAc_ac_c* actor, cXyz const& i_hitPos) {
     fpc_ProcID id = fpcM_GetID(actor);
+    cXyz offset = i_hitPos - actor->current.pos;
 
     for (BurningActor& slot : g_burningActors) {
         if (slot.actor == actor && slot.actorId == id) {
+            slot.hitOffset = offset;
             slot.timer = BURNING_ACTOR_DURATION;
             return;
         }
@@ -578,7 +605,9 @@ static void igniteBurningActor(fopAc_ac_c* actor) {
         if (slot.timer == 0) {
             slot.actor = actor;
             slot.actorId = id;
-            slot.particleKey = 0;
+            slot.hitOffset = offset;
+            slot.particleKeyA = 0;
+            slot.particleKeyB = 0;
             slot.timer = BURNING_ACTOR_DURATION;
             return;
         }
@@ -588,12 +617,14 @@ static void igniteBurningActor(fopAc_ac_c* actor) {
     g_nextBurningActorSlot = (g_nextBurningActorSlot + 1) % MAX_BURNING_ACTORS;
     slot.actor = actor;
     slot.actorId = id;
-    slot.particleKey = 0;
+    slot.hitOffset = offset;
+    slot.particleKeyA = 0;
+    slot.particleKeyB = 0;
     slot.timer = BURNING_ACTOR_DURATION;
 }
 
 // Called once per game frame (from mod_update, see below) to tick down and re-anchor every
-// currently-burning target's flame particle. Deliberately not tied to the arrow's own execute
+// currently-burning target's flame particles. Deliberately not tied to the arrow's own execute
 // hook (on_arrow_execute_post): the arrow itself is typically deleted (embedded, despawned) long
 // before BURNING_ACTOR_DURATION elapses, but the cosmetic flame on whatever it hit should keep
 // burning independently of the arrow's own lifetime.
@@ -615,13 +646,19 @@ static void updateBurningActors() {
 
         slot.timer--;
         slot.velocity = slot.actor->speed;
-        slot.particleKey = dComIfGp_particle_set(slot.particleKey, ID_ZF_J_FIRE02_FIRE,
-                                                  &slot.actor->current.pos, NULL, NULL);
 
-        JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(slot.particleKey);
-        if (emitter != NULL) {
-            emitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
-            emitter->setUserWork((uintptr_t)&slot.velocity);
+        cXyz pos = slot.actor->current.pos + slot.hitOffset;
+        slot.particleKeyA =
+            dComIfGp_particle_set(slot.particleKeyA, ID_ZI_J_LK_BURNS_A, &pos, NULL, NULL);
+        slot.particleKeyB =
+            dComIfGp_particle_set(slot.particleKeyB, ID_ZI_J_LK_BURNS_B, &pos, NULL, NULL);
+
+        for (u32 key : {slot.particleKeyA, slot.particleKeyB}) {
+            JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(key);
+            if (emitter != NULL) {
+                emitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
+                emitter->setUserWork((uintptr_t)&slot.velocity);
+            }
         }
 
         if (slot.timer == 0) {
@@ -730,13 +767,25 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
                 slot.hitActorHandled = true;
 
                 fopAc_ac_c* hitActor = arrow->field_0x688.GetAtHitAc();
-                // Excludes the player: a fire arrow striking Link (e.g. an errant shot, or a
-                // reflected/deflected one) already makes him visibly catch fire and take periodic
-                // burn damage through his own, unrelated vanilla mechanism (dCcD_MTRL_FIRE handling
-                // in daAlink_c's own damage code) - layering this purely cosmetic effect on top of
-                // that would just double up the flame visuals on the same target.
-                if (hitActor != NULL && fopAcM_GetName(hitActor) != fpcNm_ALINK_e) {
-                    igniteBurningActor(hitActor);
+                // Restricted to enemies only: fopEn_enemy_c is the base class the vast majority of
+                // enemy actor classes (d_a_e_*.cpp) derive from, carrying the shared Down/Dead/
+                // CutDownHit flags daAlink_c itself relies on for e.g. its own wolf-bite and
+                // cut-scene code (d_a_alink_wolf.inc, d_a_alink_cut.inc) - the closest thing this
+                // codebase has to a generic "is this actor an enemy" test, since (as above) there's
+                // no single shared damage/HP interface to hook instead. This also implicitly
+                // excludes the player (daAlink_c doesn't derive from fopEn_enemy_c): a fire arrow
+                // striking Link (e.g. an errant shot, or a reflected/deflected one) already makes
+                // him visibly catch fire and take periodic burn damage through his own, unrelated
+                // vanilla mechanism (dCcD_MTRL_FIRE handling in daAlink_c's own damage code) -
+                // layering this purely cosmetic effect on top of that would just double up the
+                // flame visuals on the same target. It equally excludes non-enemy actors a fire
+                // arrow might still strike (NPCs, animals, carriable objects, etc.), which
+                // shouldn't visibly catch fire at all. A small handful of enemy types that compose
+                // a plain fopAc_ac_c instead of deriving from fopEn_enemy_c (e.g. the Poison Mite
+                // swarm, daE_Bug_HIO_c/e_bug_class in d_a_e_bug.h) won't get the effect either -
+                // there's no fully generic way to catch those too without a per-type exception.
+                if (hitActor != NULL && dynamic_cast<fopEn_enemy_c*>(hitActor) != NULL) {
+                    igniteBurningActor(hitActor, *arrow->field_0x688.GetAtHitPosP());
                 }
             }
 
