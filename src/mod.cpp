@@ -767,24 +767,33 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
                 slot.hitActorHandled = true;
 
                 fopAc_ac_c* hitActor = arrow->field_0x688.GetAtHitAc();
-                // Restricted to enemies only: fopEn_enemy_c is the base class the vast majority of
-                // enemy actor classes (d_a_e_*.cpp) derive from, carrying the shared Down/Dead/
-                // CutDownHit flags daAlink_c itself relies on for e.g. its own wolf-bite and
-                // cut-scene code (d_a_alink_wolf.inc, d_a_alink_cut.inc) - the closest thing this
-                // codebase has to a generic "is this actor an enemy" test, since (as above) there's
-                // no single shared damage/HP interface to hook instead. This also implicitly
-                // excludes the player (daAlink_c doesn't derive from fopEn_enemy_c): a fire arrow
-                // striking Link (e.g. an errant shot, or a reflected/deflected one) already makes
-                // him visibly catch fire and take periodic burn damage through his own, unrelated
-                // vanilla mechanism (dCcD_MTRL_FIRE handling in daAlink_c's own damage code) -
-                // layering this purely cosmetic effect on top of that would just double up the
-                // flame visuals on the same target. It equally excludes non-enemy actors a fire
-                // arrow might still strike (NPCs, animals, carriable objects, etc.), which
-                // shouldn't visibly catch fire at all. A small handful of enemy types that compose
-                // a plain fopAc_ac_c instead of deriving from fopEn_enemy_c (e.g. the Poison Mite
-                // swarm, daE_Bug_HIO_c/e_bug_class in d_a_e_bug.h) won't get the effect either -
-                // there's no fully generic way to catch those too without a per-type exception.
-                if (hitActor != NULL && dynamic_cast<fopEn_enemy_c*>(hitActor) != NULL) {
+                // Restricted to enemies only, via the actor's own group tag (its profile's
+                // "Group" field, fopAcM_GetGroup()) rather than dynamic_cast<fopEn_enemy_c*>:
+                // fopEn_enemy_c is a class compiled separately into this mod and into the base
+                // game binary, and a cross-module dynamic_cast's success depends on the two
+                // sides' RTTI (typeinfo/vtable) agreeing exactly - unlike a plain data field read
+                // through a pointer, that isn't guaranteed to hold here, and in practice the cast
+                // against real enemy actors was never succeeding, so the effect never triggered.
+                // fopAcM_GetGroup() == fopAc_ENEMY_e instead just reads a POD field set by each
+                // actor's own static profile table (e.g. d_a_e_bg.cpp's "/* Group */
+                // fopAc_ENEMY_e"), with no RTTI involved - it's the same test daArrow_c's own hit
+                // callback already uses for its "100m headshot" achievement check
+                // (atHitCallBack(), above in this same file) and daAlink_c's targeting code use for
+                // their own "is this actor an enemy" checks, so it's proven to work reliably
+                // across this exact mod/game boundary. This also implicitly excludes the player
+                // (daAlink_c's own profile group is fopAc_PLAYER_e): a fire arrow striking Link
+                // (e.g. an errant shot, or a reflected/deflected one) already makes him visibly
+                // catch fire and take periodic burn damage through his own, unrelated vanilla
+                // mechanism (dCcD_MTRL_FIRE handling in daAlink_c's own damage code) - layering
+                // this purely cosmetic effect on top of that would just double up the flame
+                // visuals on the same target. It equally excludes non-enemy actors a fire arrow
+                // might still strike (NPCs, animals, carriable objects, etc.), which shouldn't
+                // visibly catch fire at all. A small handful of enemy types are tagged with a
+                // different group in their own profile (e.g. the Poison Mite swarm,
+                // daE_Bug_HIO_c/e_bug_class in d_a_e_bug.h, uses fopAc_ACTOR_e) and won't get the
+                // effect either - there's no fully generic way to catch those too without a
+                // per-type exception.
+                if (hitActor != NULL && fopAcM_GetGroup(hitActor) == fopAc_ENEMY_e) {
                     igniteBurningActor(hitActor, *arrow->field_0x688.GetAtHitPosP());
                 }
             }
