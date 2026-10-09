@@ -426,6 +426,9 @@ struct TrackedFireArrow {
     // (see igniteBurningActor below) once per arrow, rather than every single frame it stays
     // stuck in whatever it hit (ChkAtHit() stays true the whole time the arrow remains lodged).
     bool hitActorHandled = false;
+    // TEMPORARY diagnostic flag, mirrors hitActorHandled above but for igniteCps's own hits
+    // (against flammable objects, not actors) - see updateFireArrowEffect's igniteActive block.
+    bool igniteHitLogged = false;
 };
 
 // The player only ever has a handful of arrows in flight at once; a small ring buffer is more
@@ -445,6 +448,7 @@ static void initFireArrowSlot(TrackedFireArrow& slot, daArrow_c* arrow, fpc_Proc
     slot.particleKey = 0;
     slot.igniteActive = false;
     slot.hitActorHandled = false;
+    slot.igniteHitLogged = false;
     // Same Init() args daArrow_c itself uses for field_0x64c (d_a_arrow.cpp), so the ignition
     // collider's Stts still correctly identifies the arrow as its owning actor - it just doesn't
     // share field_0x688's hit-dedup/apid bookkeeping (see igniteStts's declaration above).
@@ -468,6 +472,11 @@ static void trackFireArrow(daArrow_c* arrow) {
     for (TrackedFireArrow& slot : g_fireArrows) {
         if (slot.arrow == arrow) {
             if (slot.arrowId != id) {
+                // TEMPORARY diagnostic logging - see updateFireArrowEffect's igniteCps logging.
+                mods::log::info(
+                    "trackFireArrow: address reused, reinitializing slot for new arrowId={} "
+                    "(was arrowId={})",
+                    id, slot.arrowId);
                 initFireArrowSlot(slot, arrow, id);
             }
             return;
@@ -475,6 +484,9 @@ static void trackFireArrow(daArrow_c* arrow) {
     }
 
     TrackedFireArrow& slot = g_fireArrows[g_nextFireArrowSlot];
+    // TEMPORARY diagnostic logging - see updateFireArrowEffect's igniteCps logging.
+    mods::log::info("trackFireArrow: new arrowId={} assigned ring-buffer slot={}", id,
+                     g_nextFireArrowSlot);
     g_nextFireArrowSlot = (g_nextFireArrowSlot + 1) % MAX_TRACKED_FIRE_ARROWS;
     initFireArrowSlot(slot, arrow, id);
 }
@@ -485,6 +497,9 @@ static void trackFireArrow(daArrow_c* arrow) {
 static void activateFireArrowIgnition(daArrow_c* arrow) {
     for (TrackedFireArrow& slot : g_fireArrows) {
         if (slot.arrow == arrow) {
+            // TEMPORARY diagnostic logging - see updateFireArrowEffect's igniteCps logging.
+            mods::log::info("activateFireArrowIgnition: igniteActive=true for arrowId={}",
+                             slot.arrowId);
             slot.igniteActive = true;
             return;
         }
@@ -781,6 +796,21 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
             }
 
             if (slot.igniteActive) {
+                // TEMPORARY diagnostic logging: read back *last* frame's cross-test result (the
+                // same one-frame-delayed pattern a torch's own Execute() uses for mCyl.ChkTgHit())
+                // before this frame's Set() below overwrites it, so a real playtest can show
+                // whether igniteCps ever registers a hit at all on a shot that fails to ignite,
+                // and if so, whether GetAtHitAc() resolves to the expected flammable object.
+                if (!slot.igniteHitLogged && slot.igniteCps.ChkAtHit()) {
+                    slot.igniteHitLogged = true;
+                    fopAc_ac_c* igniteHitActor = slot.igniteCps.GetAtHitAc();
+                    mods::log::info(
+                        "updateFireArrowEffect: igniteCps ChkAtHit true, arrowId={} hitActor "
+                        "name={} id={}",
+                        slot.arrowId, igniteHitActor != NULL ? fopAcM_GetName(igniteHitActor) : -1,
+                        igniteHitActor != NULL ? (long)fpcM_GetID(igniteHitActor) : -1L);
+                }
+
                 // A capsule (unlike a sphere) needs actual endpoints, not just a center + radius:
                 // Set() the same way field_0x688 does every frame in setArrowAt() (d_a_arrow.cpp),
                 // except spanning the arrow's real, already-travelled distance this frame
