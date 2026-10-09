@@ -716,6 +716,39 @@ static void updateBurningActors() {
         slot.timer--;
         slot.velocity = actor->speed;
 
+        // ID_ZI_J_LK_BURNS_A/B are the same particle pair daAlink_c::setFirePointDamageEffect()
+        // uses for Link's own on-fire effect (d_a_alink_effect.inc), and that function explicitly
+        // checks emitter->isEnableDeleteEmitter() every frame and stops using the emitter the
+        // moment it fires - unlike the arrow's flight-trail particle elsewhere in this file, this
+        // pair is a self-terminating JPA effect with its own short authored lifetime, baked into
+        // the particle resource itself and unaffected by how often dComIfGp_particle_set() is
+        // called with the same key. Previously, re-issuing a since-died key here just kept
+        // repositioning (or silently no-op'ing on) an emitter that had already finished on its
+        // own, so the visual flame always went out ~once that authored lifetime elapsed - a few
+        // seconds after it was first created - regardless of how many times igniteBurningActor()
+        // had since refreshed slot.timer back up to BURNING_ACTOR_DURATION on a later hit.
+        // Forcing a brand new emitter (key 0) the moment the old one reports itself as finished
+        // keeps the cosmetic flame alive for exactly as long as the timer above says it should be.
+        // TEMPORARY diagnostic logging: confirms in a real playtest whether this path is ever
+        // actually taken (i.e. whether the particle really does self-terminate independently of
+        // slot.timer, as d_a_alink_effect.inc's own identical check implies it does).
+        if (JPABaseEmitter* emitterA = dComIfGp_particle_getEmitter(slot.particleKeyA);
+            emitterA != NULL && emitterA->isEnableDeleteEmitter()) {
+            mods::log::info(
+                "updateBurningActors: actorId={} particleKeyA emitter self-terminated, "
+                "forcing new emitter",
+                slot.actorId);
+            slot.particleKeyA = 0;
+        }
+        if (JPABaseEmitter* emitterB = dComIfGp_particle_getEmitter(slot.particleKeyB);
+            emitterB != NULL && emitterB->isEnableDeleteEmitter()) {
+            mods::log::info(
+                "updateBurningActors: actorId={} particleKeyB emitter self-terminated, "
+                "forcing new emitter",
+                slot.actorId);
+            slot.particleKeyB = 0;
+        }
+
         cXyz pos = getBurnAnchorPos(actor);
         slot.particleKeyA =
             dComIfGp_particle_set(slot.particleKeyA, ID_ZI_J_LK_BURNS_A, &pos, NULL, NULL);
