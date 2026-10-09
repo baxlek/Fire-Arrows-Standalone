@@ -16,7 +16,6 @@
 #include "d/d_save.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_manager.h"
-#include "m_Do/m_Do_mtx.h"
 
 DEFINE_MOD();
 
@@ -550,19 +549,6 @@ struct BurningActor {
     // lifecycle at all (unlike the arrow, which this mod itself tracks from nock to impact), so it
     // has no other way to notice the original target was deleted out from under a stale pointer.
     fpc_ProcID actorId = fpcM_ERROR_PROCESS_ID_e;
-    // Where on the target's body the arrow actually struck, relative to its origin (current.pos,
-    // usually the ground-level/root point most actors are positioned by) - captured once at
-    // ignite time from the arrow's own collider (see igniteBurningActor below) so the flame reads
-    // as coming from roughly center-mass/wherever it actually hit, not the ground. Stored in the
-    // target's own local (yaw-relative) space rather than world space - see rotateByActorYaw
-    // below - and re-projected back into world space using the target's current.angle.y plus
-    // current.pos every frame (see updateBurningActors), so the flame correctly turns and moves
-    // with the target's body, same as it would if it were parented to a bone - just using only
-    // the actor's overall yaw rather than an actual bone matrix, which no shared enemy base class
-    // exposes generically. Without this, the flame stayed pinned to its original world-space
-    // direction as the target turned (e.g. to face Link mid-fight), visibly detaching from the
-    // model and appearing to float.
-    cXyz hitOffset = {0.0f, 0.0f, 0.0f};
     // Two emitters per burning actor, matching setFirePointDamageEffect's own A/B pair (one for
     // the base flame, one for the sparks/embers on top) rather than a single particle.
     u32 particleKeyA = 0;
@@ -584,47 +570,55 @@ static constexpr int MAX_BURNING_ACTORS = 8;
 static BurningActor g_burningActors[MAX_BURNING_ACTORS];
 static int g_nextBurningActorSlot = 0;
 
-// Rotates i_localOffset (an offset expressed relative to an actor's own facing direction) into
-// world space using only that actor's current yaw (current.angle.y) - the same generic,
-// model-agnostic transform the game's own code already uses whenever it needs to re-attach a
-// fixed offset to an actor that turns in place (e.g. daE_KK_c::executeWalk's
-// mDoMtx_YrotS(*calc_mtx, current.angle.y) + MtxPosition() in d_a_e_kk.cpp), rather than anything
-// Link- or bone-specific. Deliberately ignores pitch/roll (angle.x/.z): nearly every ground actor
-// only ever yaws, and there's no generic (cross-actor-type) way to read a full body-rotation
-// matrix without an actual joint/bone matrix, which is exactly what vanilla's own
-// setFirePointDamageEffect relies on for Link specifically (see the big comment above) and has no
-// enemy-generic equivalent for. Passing -angle.y converts a world-space offset into this same
-// local space (the inverse of a pure Y rotation is just its negation), which is how
-// igniteBurningActor below captures hitOffset in the first place.
-static cXyz rotateByActorYaw(cXyz const& i_localOffset, s16 i_angleY) {
-    Mtx rotMtx;
-    mDoMtx_YrotS(rotMtx, i_angleY);
-    cXyz worldOffset;
-    mDoMtx_multVec(rotMtx, &i_localOffset, &worldOffset);
-    return worldOffset;
+// Returns the best available world-space anchor point for a target's cosmetic burn flame.
+//
+// Earlier attempts anchored the flame at the arrow's impact point, expressed as a fixed local
+// offset from the target's current.pos and re-projected into world space every frame using only
+// the target's current.angle.y (the same generic transform daE_KK_c::executeWalk uses to re-
+// attach a fixed offset to a turning actor, d_a_e_kk.cpp). That tracked ordinary turning fine, but
+// fell apart the moment the hit itself triggered a knockback/stagger reaction: daE_BG_c's generic
+// damage reaction (d_a_e_bg.cpp's executeDamage()) spins shape_angle.x and shape_angle.y - a
+// separate field from current.angle, used only for rendering (see mtx_set(), which builds the
+// actual model matrix from shape_angle, not current.angle) - so the body visibly tumbles/recoils
+// in ways no single yaw-only offset can follow, leaving the flame floating wherever the body
+// would have ended up had it not reacted to the hit at all.
+//
+// actor->eyePos sidesteps this entirely: it's a generic field on every fopAc_ac_c (not something
+// this mod adds), and the large majority of enemy actor classes recompute it every single frame
+// from their model's actual current animated joint matrix (e.g. daE_BG_c::cc_set(), d_a_e_bg.cpp)
+// rather than from current.pos/current.angle at all - so it already reflects wherever the body is
+// really posed, tumbling, falling or otherwise, with no extra rotation math needed here.
+//
+// Not every enemy class bothers maintaining it past actor creation though, where it's defaulted to
+// the actor's spawn point (f_op_actor.cpp sets actor->eyePos = actor->home.pos once, generically,
+// for every actor). For those classes eyePos would stay pinned at home.pos forever, drifting
+// arbitrarily far from the actor as it moves around. Guard against that by falling back to
+// current.pos (plus a small fixed vertical nudge so the flame doesn't anchor at ground/feet level)
+// whenever eyePos has drifted implausibly far from current.pos - far further than eyePos's own
+// local offset from the body (a handful of model-size units) would ever actually be.
+static constexpr f32 EYEPOS_MAX_PLAUSIBLE_DIST = 300.0f;
+static constexpr f32 FALLBACK_ANCHOR_HEIGHT = 40.0f;
+
+static cXyz getBurnAnchorPos(fopAc_ac_c* actor) {
+    if (actor->eyePos.abs(actor->current.pos) <= EYEPOS_MAX_PLAUSIBLE_DIST) {
+        return actor->eyePos;
+    }
+    return actor->current.pos + cXyz(0.0f, FALLBACK_ANCHOR_HEIGHT, 0.0f);
 }
 
-// Starts (or refreshes, if already burning) the cosmetic flame on a hit target, anchored at
-// i_hitPos (the arrow's actual impact point on the target, see updateFireArrowEffect's call site)
-// rather than the target's own current.pos. Reuses a free slot (timer == 0) if one exists so an
-// actor that's still burning never gets evicted by an unrelated new ignition elsewhere; otherwise
-// evicts the oldest slot in ring-buffer order, exactly like trackFireArrow does for arrows. An
-// evicted slot's particle keys are simply abandoned rather than explicitly stopped: like the
-// arrow's own trail particle (see updateFireArrowEffect below), this effect is kept alive purely
-// by being re-issued every frame, so no longer calling dComIfGp_particle_set() for it is already
-// enough for it to stop emitting and fade out on its own - there's no separate "stop" call needed
-// or used anywhere else in this file for the same reason.
-static void igniteBurningActor(fopAc_ac_c* actor, cXyz const& i_hitPos) {
+// Starts (or refreshes, if already burning) the cosmetic flame on a hit target. Reuses a free slot
+// (timer == 0) if one exists so an actor that's still burning never gets evicted by an unrelated
+// new ignition elsewhere; otherwise evicts the oldest slot in ring-buffer order, exactly like
+// trackFireArrow does for arrows. An evicted slot's particle keys are simply abandoned rather than
+// explicitly stopped: like the arrow's own trail particle (see updateFireArrowEffect below), this
+// effect is kept alive purely by being re-issued every frame, so no longer calling
+// dComIfGp_particle_set() for it is already enough for it to stop emitting and fade out on its own
+// - there's no separate "stop" call needed or used anywhere else in this file for the same reason.
+static void igniteBurningActor(fopAc_ac_c* actor) {
     fpc_ProcID id = fpcM_GetID(actor);
-    // i_hitPos arrives in world space; convert it to the target's own local (yaw-relative) space
-    // immediately (see rotateByActorYaw above and hitOffset's own comment), so
-    // updateBurningActors can re-derive the correct world-space offset every frame regardless of
-    // how the target has turned since.
-    cXyz offset = rotateByActorYaw(i_hitPos - actor->current.pos, -actor->current.angle.y);
 
     for (BurningActor& slot : g_burningActors) {
         if (slot.actor == actor && slot.actorId == id) {
-            slot.hitOffset = offset;
             slot.timer = BURNING_ACTOR_DURATION;
             return;
         }
@@ -634,7 +628,6 @@ static void igniteBurningActor(fopAc_ac_c* actor, cXyz const& i_hitPos) {
         if (slot.timer == 0) {
             slot.actor = actor;
             slot.actorId = id;
-            slot.hitOffset = offset;
             slot.particleKeyA = 0;
             slot.particleKeyB = 0;
             slot.timer = BURNING_ACTOR_DURATION;
@@ -646,7 +639,6 @@ static void igniteBurningActor(fopAc_ac_c* actor, cXyz const& i_hitPos) {
     g_nextBurningActorSlot = (g_nextBurningActorSlot + 1) % MAX_BURNING_ACTORS;
     slot.actor = actor;
     slot.actorId = id;
-    slot.hitOffset = offset;
     slot.particleKeyA = 0;
     slot.particleKeyB = 0;
     slot.timer = BURNING_ACTOR_DURATION;
@@ -676,8 +668,7 @@ static void updateBurningActors() {
         slot.timer--;
         slot.velocity = slot.actor->speed;
 
-        cXyz pos = slot.actor->current.pos +
-                   rotateByActorYaw(slot.hitOffset, slot.actor->current.angle.y);
+        cXyz pos = getBurnAnchorPos(slot.actor);
         slot.particleKeyA =
             dComIfGp_particle_set(slot.particleKeyA, ID_ZI_J_LK_BURNS_A, &pos, NULL, NULL);
         slot.particleKeyB =
@@ -824,7 +815,7 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
                 // effect either - there's no fully generic way to catch those too without a
                 // per-type exception.
                 if (hitActor != NULL && fopAcM_GetGroup(hitActor) == fopAc_ENEMY_e) {
-                    igniteBurningActor(hitActor, *arrow->field_0x688.GetAtHitPosP());
+                    igniteBurningActor(hitActor);
                 }
             }
 
