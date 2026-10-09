@@ -549,11 +549,15 @@ static const JGeometry::TVec3<f32> BURN_EFFECT_SCALE(3.0f, 3.0f, 3.0f);
 // external to daArrow_c above: there's no spare field on an arbitrary enemy actor to repurpose,
 // and every enemy actor class is laid out differently.
 struct BurningActor {
-    fopAc_ac_c* actor = nullptr;
-    // Same actor-pool address reuse hazard TrackedFireArrow's arrowId guards against (see its
-    // comment above) - except more important here, since this code never owns the target's
-    // lifecycle at all (unlike the arrow, which this mod itself tracks from nock to impact), so it
-    // has no other way to notice the original target was deleted out from under a stale pointer.
+    // Identifies which actor this flame belongs to. Deliberately not paired with a stored raw
+    // fopAc_ac_c* like TrackedFireArrow's arrowId is (see its comment above): once the target is
+    // deleted (e.g. defeated and its corpse despawned), fopAcM_delete() just frees its slot back to
+    // the actor pool without clearing or overwriting it, so a stored pointer would keep reading
+    // back the same (still-correct-looking) id for as long as nothing new happens to reuse that
+    // exact address - i.e. the flame would keep burning on a dead target indefinitely, which is
+    // exactly the bug this field's previous approach had. fopAcM_SearchByID() (see
+    // updateBurningActors below) looks the id up in the actor manager's own live list instead,
+    // which is the only way to actually know whether the target is still alive right now.
     fpc_ProcID actorId = fpcM_ERROR_PROCESS_ID_e;
     // Two emitters per burning actor, matching setFirePointDamageEffect's own A/B pair (one for
     // the base flame, one for the sparks/embers on top) rather than a single particle.
@@ -624,7 +628,7 @@ static void igniteBurningActor(fopAc_ac_c* actor) {
     fpc_ProcID id = fpcM_GetID(actor);
 
     for (BurningActor& slot : g_burningActors) {
-        if (slot.actor == actor && slot.actorId == id) {
+        if (slot.timer != 0 && slot.actorId == id) {
             slot.timer = BURNING_ACTOR_DURATION;
             return;
         }
@@ -632,7 +636,6 @@ static void igniteBurningActor(fopAc_ac_c* actor) {
 
     for (BurningActor& slot : g_burningActors) {
         if (slot.timer == 0) {
-            slot.actor = actor;
             slot.actorId = id;
             slot.particleKeyA = 0;
             slot.particleKeyB = 0;
@@ -643,7 +646,6 @@ static void igniteBurningActor(fopAc_ac_c* actor) {
 
     BurningActor& slot = g_burningActors[g_nextBurningActorSlot];
     g_nextBurningActorSlot = (g_nextBurningActorSlot + 1) % MAX_BURNING_ACTORS;
-    slot.actor = actor;
     slot.actorId = id;
     slot.particleKeyA = 0;
     slot.particleKeyB = 0;
@@ -661,20 +663,21 @@ static void updateBurningActors() {
             continue;
         }
 
-        // Same actor-pool address reuse hazard as TrackedFireArrow (see arrowId's comment above):
-        // if the original target was deleted and its slot handed to a new, unrelated actor,
-        // fpcM_GetID() on the (now-stale) pointer will no longer match the ID recorded at ignite
-        // time. Free the slot instead of animating fire on whatever now occupies that address.
-        if (fpcM_GetID(slot.actor) != slot.actorId) {
-            slot.actor = nullptr;
+        // The authoritative "is this actor still alive" check (see actorId's own comment above):
+        // searches the actor manager's live actor list by id instead of dereferencing a stored
+        // pointer, so a defeated/despawned target is noticed the moment it's actually deleted,
+        // rather than only once its freed memory happens to get reused by some other actor.
+        fopAc_ac_c* actor = fopAcM_SearchByID(slot.actorId);
+        if (actor == NULL) {
+            slot.actorId = fpcM_ERROR_PROCESS_ID_e;
             slot.timer = 0;
             continue;
         }
 
         slot.timer--;
-        slot.velocity = slot.actor->speed;
+        slot.velocity = actor->speed;
 
-        cXyz pos = getBurnAnchorPos(slot.actor);
+        cXyz pos = getBurnAnchorPos(actor);
         slot.particleKeyA =
             dComIfGp_particle_set(slot.particleKeyA, ID_ZI_J_LK_BURNS_A, &pos, NULL, NULL);
         slot.particleKeyB =
@@ -690,7 +693,7 @@ static void updateBurningActors() {
         }
 
         if (slot.timer == 0) {
-            slot.actor = nullptr;
+            slot.actorId = fpcM_ERROR_PROCESS_ID_e;
         }
     }
 }
