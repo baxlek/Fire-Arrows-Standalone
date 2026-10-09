@@ -546,10 +546,16 @@ static bool isArrowStationary(daArrow_c* arrow) {
 // it works identically for any target.
 // --------------------------------------------------------------------------------------------
 
-// How long (in frames, 60 = 1 second) the cosmetic flame keeps burning on a hit target before it
-// fades out on its own. 300 frames = 5 seconds, long enough to clearly read as "this thing is on
-// fire" for a good while without lingering indefinitely.
-static constexpr s16 BURNING_ACTOR_DURATION = 300;
+// How long (in frames) the cosmetic flame keeps burning on a hit target before it fades out on
+// its own. dusklight's simulation tick runs at a fixed 30Hz (dusk::game_clock::kSimPeriod =
+// 1/30, in game_clock.h) - matching the original game's native frame rate - and mod_update()
+// (and therefore updateBurningActors() below) is driven once per sim tick, not once per rendered
+// frame, so "frames" here means 1/30 second each, not 1/60. 150 frames = 5 seconds, long enough
+// to clearly read as "this thing is on fire" for a good while without lingering indefinitely.
+// (A previous build of this constant assumed a 60fps tick rate and used 300, which actually
+// produced a 10 second burn - confirmed via timestamped log evidence showing a refresh-to-expiry
+// gap of ~10s, not the intended 5s.)
+static constexpr s16 BURNING_ACTOR_DURATION = 150;
 
 // Uniformly enlarges the cosmetic flame to 3x its native particle size via setGlobalScale() - the
 // same generic, per-emitter scaling knob the game's own code already uses whenever a particle
