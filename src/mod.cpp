@@ -426,9 +426,6 @@ struct TrackedFireArrow {
     // (see igniteBurningActor below) once per arrow, rather than every single frame it stays
     // stuck in whatever it hit (ChkAtHit() stays true the whole time the arrow remains lodged).
     bool hitActorHandled = false;
-    // TEMPORARY diagnostic flag, mirrors hitActorHandled above but for igniteCps's own hits
-    // (against flammable objects, not actors) - see updateFireArrowEffect's igniteActive block.
-    bool igniteHitLogged = false;
 };
 
 // The player only ever has a handful of arrows in flight at once; a small ring buffer is more
@@ -448,7 +445,6 @@ static void initFireArrowSlot(TrackedFireArrow& slot, daArrow_c* arrow, fpc_Proc
     slot.particleKey = 0;
     slot.igniteActive = false;
     slot.hitActorHandled = false;
-    slot.igniteHitLogged = false;
     // Same Init() args daArrow_c itself uses for field_0x64c (d_a_arrow.cpp), so the ignition
     // collider's Stts still correctly identifies the arrow as its owning actor - it just doesn't
     // share field_0x688's hit-dedup/apid bookkeeping (see igniteStts's declaration above).
@@ -472,11 +468,6 @@ static void trackFireArrow(daArrow_c* arrow) {
     for (TrackedFireArrow& slot : g_fireArrows) {
         if (slot.arrow == arrow) {
             if (slot.arrowId != id) {
-                // TEMPORARY diagnostic logging - see updateFireArrowEffect's igniteCps logging.
-                mods::log::info(
-                    "trackFireArrow: address reused, reinitializing slot for new arrowId={} "
-                    "(was arrowId={})",
-                    id, slot.arrowId);
                 initFireArrowSlot(slot, arrow, id);
             }
             return;
@@ -484,9 +475,6 @@ static void trackFireArrow(daArrow_c* arrow) {
     }
 
     TrackedFireArrow& slot = g_fireArrows[g_nextFireArrowSlot];
-    // TEMPORARY diagnostic logging - see updateFireArrowEffect's igniteCps logging.
-    mods::log::info("trackFireArrow: new arrowId={} assigned ring-buffer slot={}", id,
-                     g_nextFireArrowSlot);
     g_nextFireArrowSlot = (g_nextFireArrowSlot + 1) % MAX_TRACKED_FIRE_ARROWS;
     initFireArrowSlot(slot, arrow, id);
 }
@@ -497,9 +485,6 @@ static void trackFireArrow(daArrow_c* arrow) {
 static void activateFireArrowIgnition(daArrow_c* arrow) {
     for (TrackedFireArrow& slot : g_fireArrows) {
         if (slot.arrow == arrow) {
-            // TEMPORARY diagnostic logging - see updateFireArrowEffect's igniteCps logging.
-            mods::log::info("activateFireArrowIgnition: igniteActive=true for arrowId={}",
-                             slot.arrowId);
             slot.igniteActive = true;
             return;
         }
@@ -648,19 +633,9 @@ static cXyz getBurnAnchorPos(fopAc_ac_c* actor) {
 static void igniteBurningActor(fopAc_ac_c* actor) {
     fpc_ProcID id = fpcM_GetID(actor);
 
-    // TEMPORARY diagnostic logging (see updateFireArrowEffect/updateBurningActors for the rest):
-    // we have no way to reproduce the "Chilfos doesn't reignite for a while after its burn
-    // expires" report in this environment, and more than one plausible-looking static-analysis
-    // theory has already turned out not to be it. Logging every branch actually taken here lets a
-    // real playtest tell us, frame-accurately, whether ignition is even being attempted on the
-    // failing shot and if so which path it takes - rather than guessing again.
-    mods::log::info("igniteBurningActor: actor name={} id={}", fopAcM_GetName(actor), id);
-
     for (int i = 0; i < MAX_BURNING_ACTORS; i++) {
         BurningActor& slot = g_burningActors[i];
         if (slot.timer != 0 && slot.actorId == id) {
-            mods::log::info("igniteBurningActor: refreshing existing slot={} oldTimer={}", i,
-                             slot.timer);
             slot.timer = BURNING_ACTOR_DURATION;
             return;
         }
@@ -669,7 +644,6 @@ static void igniteBurningActor(fopAc_ac_c* actor) {
     for (int i = 0; i < MAX_BURNING_ACTORS; i++) {
         BurningActor& slot = g_burningActors[i];
         if (slot.timer == 0) {
-            mods::log::info("igniteBurningActor: using free slot={}", i);
             slot.actorId = id;
             slot.particleKeyA = 0;
             slot.particleKeyB = 0;
@@ -679,8 +653,6 @@ static void igniteBurningActor(fopAc_ac_c* actor) {
     }
 
     BurningActor& slot = g_burningActors[g_nextBurningActorSlot];
-    mods::log::info("igniteBurningActor: evicting slot={} (was actorId={} timer={})",
-                     g_nextBurningActorSlot, slot.actorId, slot.timer);
     g_nextBurningActorSlot = (g_nextBurningActorSlot + 1) % MAX_BURNING_ACTORS;
     slot.actorId = id;
     slot.particleKeyA = 0;
@@ -705,9 +677,6 @@ static void updateBurningActors() {
         // rather than only once its freed memory happens to get reused by some other actor.
         fopAc_ac_c* actor = fopAcM_SearchByID(slot.actorId);
         if (actor == NULL) {
-            // TEMPORARY diagnostic logging - see igniteBurningActor's comment above.
-            mods::log::info("updateBurningActors: actorId={} no longer alive, freeing slot",
-                             slot.actorId);
             slot.actorId = fpcM_ERROR_PROCESS_ID_e;
             slot.timer = 0;
             continue;
@@ -722,30 +691,19 @@ static void updateBurningActors() {
         // moment it fires - unlike the arrow's flight-trail particle elsewhere in this file, this
         // pair is a self-terminating JPA effect with its own short authored lifetime, baked into
         // the particle resource itself and unaffected by how often dComIfGp_particle_set() is
-        // called with the same key. Previously, re-issuing a since-died key here just kept
-        // repositioning (or silently no-op'ing on) an emitter that had already finished on its
-        // own, so the visual flame always went out ~once that authored lifetime elapsed - a few
-        // seconds after it was first created - regardless of how many times igniteBurningActor()
-        // had since refreshed slot.timer back up to BURNING_ACTOR_DURATION on a later hit.
-        // Forcing a brand new emitter (key 0) the moment the old one reports itself as finished
-        // keeps the cosmetic flame alive for exactly as long as the timer above says it should be.
-        // TEMPORARY diagnostic logging: confirms in a real playtest whether this path is ever
-        // actually taken (i.e. whether the particle really does self-terminate independently of
-        // slot.timer, as d_a_alink_effect.inc's own identical check implies it does).
+        // called with the same key. Re-issuing a since-died key here just keeps repositioning (or
+        // silently no-op'ing on) an emitter that had already finished on its own, so the visual
+        // flame would otherwise go out ~once that authored lifetime elapsed - a few seconds after
+        // it was first created - regardless of how many times igniteBurningActor() had since
+        // refreshed slot.timer back up to BURNING_ACTOR_DURATION on a later hit. Forcing a brand
+        // new emitter (key 0) the moment the old one reports itself as finished keeps the cosmetic
+        // flame alive for exactly as long as the timer above says it should be.
         if (JPABaseEmitter* emitterA = dComIfGp_particle_getEmitter(slot.particleKeyA);
             emitterA != NULL && emitterA->isEnableDeleteEmitter()) {
-            mods::log::info(
-                "updateBurningActors: actorId={} particleKeyA emitter self-terminated, "
-                "forcing new emitter",
-                slot.actorId);
             slot.particleKeyA = 0;
         }
         if (JPABaseEmitter* emitterB = dComIfGp_particle_getEmitter(slot.particleKeyB);
             emitterB != NULL && emitterB->isEnableDeleteEmitter()) {
-            mods::log::info(
-                "updateBurningActors: actorId={} particleKeyB emitter self-terminated, "
-                "forcing new emitter",
-                slot.actorId);
             slot.particleKeyB = 0;
         }
 
@@ -765,9 +723,6 @@ static void updateBurningActors() {
         }
 
         if (slot.timer == 0) {
-            // TEMPORARY diagnostic logging - see igniteBurningActor's comment above.
-            mods::log::info("updateBurningActors: actorId={} burn expired naturally, freeing slot",
-                             slot.actorId);
             slot.actorId = fpcM_ERROR_PROCESS_ID_e;
         }
     }
@@ -835,21 +790,6 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
             }
 
             if (slot.igniteActive) {
-                // TEMPORARY diagnostic logging: read back *last* frame's cross-test result (the
-                // same one-frame-delayed pattern a torch's own Execute() uses for mCyl.ChkTgHit())
-                // before this frame's Set() below overwrites it, so a real playtest can show
-                // whether igniteCps ever registers a hit at all on a shot that fails to ignite,
-                // and if so, whether GetAtHitAc() resolves to the expected flammable object.
-                if (!slot.igniteHitLogged && slot.igniteCps.ChkAtHit()) {
-                    slot.igniteHitLogged = true;
-                    fopAc_ac_c* igniteHitActor = slot.igniteCps.GetAtHitAc();
-                    mods::log::info(
-                        "updateFireArrowEffect: igniteCps ChkAtHit true, arrowId={} hitActor "
-                        "name={} id={}",
-                        slot.arrowId, igniteHitActor != NULL ? fopAcM_GetName(igniteHitActor) : -1,
-                        igniteHitActor != NULL ? (long)fpcM_GetID(igniteHitActor) : -1L);
-                }
-
                 // A capsule (unlike a sphere) needs actual endpoints, not just a center + radius:
                 // Set() the same way field_0x688 does every frame in setArrowAt() (d_a_arrow.cpp),
                 // except spanning the arrow's real, already-travelled distance this frame
@@ -902,12 +842,6 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
             // read just leaves hitActorHandled false and tries again next frame instead.
             if (!slot.hitActorHandled && arrow->field_0x688.ChkAtHit()) {
                 fopAc_ac_c* hitActor = arrow->field_0x688.GetAtHitAc();
-                // TEMPORARY diagnostic logging (see igniteBurningActor/updateBurningActors for the
-                // rest): logs every frame ChkAtHit() reads true while still unresolved, so a real
-                // playtest shows exactly how many frames (if any) it takes GetAtHitAc() to resolve
-                // on a failing hit, rather than us guessing further.
-                mods::log::info("updateFireArrowEffect: ChkAtHit true, arrowId={} GetAtHitAc={}",
-                                 slot.arrowId, hitActor != NULL ? (long)fpcM_GetID(hitActor) : -1L);
                 if (hitActor != NULL) {
                     slot.hitActorHandled = true;
 
