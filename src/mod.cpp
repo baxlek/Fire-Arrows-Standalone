@@ -627,15 +627,28 @@ static cXyz getBurnAnchorPos(fopAc_ac_c* actor) {
 static void igniteBurningActor(fopAc_ac_c* actor) {
     fpc_ProcID id = fpcM_GetID(actor);
 
-    for (BurningActor& slot : g_burningActors) {
+    // TEMPORARY diagnostic logging (see updateFireArrowEffect/updateBurningActors for the rest):
+    // we have no way to reproduce the "Chilfos doesn't reignite for a while after its burn
+    // expires" report in this environment, and more than one plausible-looking static-analysis
+    // theory has already turned out not to be it. Logging every branch actually taken here lets a
+    // real playtest tell us, frame-accurately, whether ignition is even being attempted on the
+    // failing shot and if so which path it takes - rather than guessing again.
+    mods::log::info("igniteBurningActor: actor name={} id={}", fopAcM_GetName(actor), id);
+
+    for (int i = 0; i < MAX_BURNING_ACTORS; i++) {
+        BurningActor& slot = g_burningActors[i];
         if (slot.timer != 0 && slot.actorId == id) {
+            mods::log::info("igniteBurningActor: refreshing existing slot={} oldTimer={}", i,
+                             slot.timer);
             slot.timer = BURNING_ACTOR_DURATION;
             return;
         }
     }
 
-    for (BurningActor& slot : g_burningActors) {
+    for (int i = 0; i < MAX_BURNING_ACTORS; i++) {
+        BurningActor& slot = g_burningActors[i];
         if (slot.timer == 0) {
+            mods::log::info("igniteBurningActor: using free slot={}", i);
             slot.actorId = id;
             slot.particleKeyA = 0;
             slot.particleKeyB = 0;
@@ -645,6 +658,8 @@ static void igniteBurningActor(fopAc_ac_c* actor) {
     }
 
     BurningActor& slot = g_burningActors[g_nextBurningActorSlot];
+    mods::log::info("igniteBurningActor: evicting slot={} (was actorId={} timer={})",
+                     g_nextBurningActorSlot, slot.actorId, slot.timer);
     g_nextBurningActorSlot = (g_nextBurningActorSlot + 1) % MAX_BURNING_ACTORS;
     slot.actorId = id;
     slot.particleKeyA = 0;
@@ -669,6 +684,9 @@ static void updateBurningActors() {
         // rather than only once its freed memory happens to get reused by some other actor.
         fopAc_ac_c* actor = fopAcM_SearchByID(slot.actorId);
         if (actor == NULL) {
+            // TEMPORARY diagnostic logging - see igniteBurningActor's comment above.
+            mods::log::info("updateBurningActors: actorId={} no longer alive, freeing slot",
+                             slot.actorId);
             slot.actorId = fpcM_ERROR_PROCESS_ID_e;
             slot.timer = 0;
             continue;
@@ -693,6 +711,9 @@ static void updateBurningActors() {
         }
 
         if (slot.timer == 0) {
+            // TEMPORARY diagnostic logging - see igniteBurningActor's comment above.
+            mods::log::info("updateBurningActors: actorId={} burn expired naturally, freeing slot",
+                             slot.actorId);
             slot.actorId = fpcM_ERROR_PROCESS_ID_e;
         }
     }
@@ -812,6 +833,12 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
             // read just leaves hitActorHandled false and tries again next frame instead.
             if (!slot.hitActorHandled && arrow->field_0x688.ChkAtHit()) {
                 fopAc_ac_c* hitActor = arrow->field_0x688.GetAtHitAc();
+                // TEMPORARY diagnostic logging (see igniteBurningActor/updateBurningActors for the
+                // rest): logs every frame ChkAtHit() reads true while still unresolved, so a real
+                // playtest shows exactly how many frames (if any) it takes GetAtHitAc() to resolve
+                // on a failing hit, rather than us guessing further.
+                mods::log::info("updateFireArrowEffect: ChkAtHit true, arrowId={} GetAtHitAc={}",
+                                 slot.arrowId, hitActor != NULL ? (long)fpcM_GetID(hitActor) : -1L);
                 if (hitActor != NULL) {
                     slot.hitActorHandled = true;
 
