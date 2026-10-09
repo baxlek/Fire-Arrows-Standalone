@@ -16,6 +16,7 @@
 #include "d/d_save.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_manager.h"
+#include "m_Do/m_Do_mtx.h"
 
 DEFINE_MOD();
 
