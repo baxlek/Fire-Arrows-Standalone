@@ -26,9 +26,11 @@ IMPORT_SERVICE(LogService, svc_log);
 // Fire Arrows
 //
 // Lets the player mix the Lantern into the Bow's C-button slot, exactly like the vanilla
-// Bow & Hawkeye combo. While the combo is equipped, every arrow fired is lit on the way out,
-// igniting whatever it hits the same way the fire arrows shot by Bulblin (Bokoblin) archers do.
-// Each shot costs the same amount of lantern oil as a single lantern swing.
+// Bow & Hawkeye combo. While the combo is equipped, arrows are lit on the way out by default,
+// igniting whatever they hit the same way the fire arrows shot by Bulblin (Bokoblin) archers do.
+// Each shot costs the same amount of lantern oil as a single lantern swing. While aiming, the same
+// button press that switches a Bow & Bomb Arrow combo between bomb and normal arrows switches this
+// combo between fire and normal arrows instead.
 // --------------------------------------------------------------------------------------------
 
 // dComIfGs_getMixItemIndex() returns this when a C-button slot has no item mixed into it.
@@ -95,6 +97,26 @@ DEFINE_HOOK(&daArrow_c::execute, ArrowExecute);
 // either), so no new icon is needed here: only the visibility gate has to widen to also cover the
 // combo. See on_draw_kantera_meter_pre below for why the gate is otherwise closed for the combo.
 DEFINE_HOOK(&dMeter2Draw_c::drawKanteraMeter, DrawKanteraMeter);
+
+// Hook target: the function that lets the vanilla Bow+Bomb and Bow+Hawkeye combos switch between
+// their two arrow types while the bow is drawn back and held (mEquipItem == dItemNo_BOMB_ARROW_e/
+// dItemNo_HAWK_ARROW_e branches below), gated on the same arrowChangeTrigger() press used for
+// both. The Bow+Lantern combo never changes mEquipItem away from dItemNo_BOW_e (unlike those two,
+// which get their own dedicated item numbers - see checkBowLanternCombo's comment above), so the
+// original function's own `mEquipItem == dItemNo_BOW_e && field_0x301e == 0` guard always takes
+// its early-return branch for it and never reaches the switching logic at all. This hook adds an
+// equivalent branch of our own ahead of that, active only while the combo is equipped, so the same
+// physical button press used for Bomb Arrow/Hawkeye switching also toggles Fire Arrow mode.
+DEFINE_HOOK(&daAlink_c::changeArrowType, ChangeArrowType);
+
+// Hook target: the moment the Hero's Bow transitions from not-drawn to freshly drawn back (i.e.
+// nocking the very first arrow of a new aim, as opposed to a mid-draw arrow-type switch). This is
+// where the vanilla Bomb Arrow combo resets its own toggle based on current ammo (`field_0x301e`,
+// see the mEquipItem == dItemNo_BOMB_ARROW_e branch below); mirrored here to reset Fire Arrow mode
+// to its default (on, if there's oil to spend) at the start of every fresh aim, the same way Bomb
+// Arrow mode always starts from "on" if the player has bombs, regardless of how the previous aim
+// was left.
+DEFINE_HOOK(&daAlink_c::setBowReadyAnime, SetBowReadyAnime);
 
 // Slot temporarily disguised by disguiseLanternPre(), restored by restoreLanternPost().
 // NO_MIX_ITEM means "nothing to restore". These hooks never nest (each menu function above runs
@@ -210,6 +232,71 @@ static bool checkBowLanternCombo() {
     }
 
     return false;
+}
+
+// Whether the Bow+Lantern combo should currently light its arrows on release (true) or shoot
+// plain arrows while leaving the Lantern's oil untouched (false). Mirrors the vanilla Bomb Arrow
+// combo's own field_0x301e toggle, except tracked externally here rather than reusing that field,
+// since the Bow+Lantern combo never changes mEquipItem away from dItemNo_BOW_e (unlike Bomb
+// Arrow/Hawkeye - see checkBowLanternCombo's comment above) and setBowReadyAnime()'s own
+// field_0x301e reset (the mEquipItem == dItemNo_BOMB_ARROW_e branch) therefore never runs for it;
+// reusing that field here would leave it forced back to 0 on every fresh draw by that same branch.
+// Defaults to true so a freshly loaded save (or before the player ever draws the combo) behaves
+// exactly like this mod did before this toggle existed: fire arrows whenever oil is available.
+static bool g_fireArrowModeOn = true;
+
+// Runs once per frame while the Bow+Lantern combo is drawn back and held (the same call site the
+// vanilla function itself uses for the Bomb Arrow/Hawkeye combos - see ChangeArrowType's hook
+// comment above). Toggles g_fireArrowModeOn on arrowChangeTrigger(), exactly mirroring the vanilla
+// Bomb Arrow branch just below in the original function: switching out of fire mode is always
+// allowed, but switching into it is blocked while there's no oil to spend on it, the same way the
+// vanilla guard blocks entering Bomb Arrow mode with zero bombs loaded (field_0x301e == 0 &&
+// dComIfGp_getSelectItemNum(mSelectItemId) == 0) while always allowing leaving it.
+static HookAction on_change_arrow_type_pre(ModContext*, void* args, void*, void*) {
+    daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
+
+    if (!checkBowLanternCombo()) {
+        return HOOK_CONTINUE;
+    }
+
+    if (link->checkCanoeSlider() || (!g_fireArrowModeOn && dComIfGs_getOil() == 0)) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+
+    link->setItemActionButtonStatus(BUTTON_STATUS_SWITCH);
+
+    if (link->arrowChangeTrigger()) {
+        g_fireArrowModeOn = !g_fireArrowModeOn;
+
+        // Re-nock the already-drawn arrow so its cosmetic flame (or lack thereof) and the oil it
+        // will spend on release immediately reflect the new mode, exactly like the vanilla
+        // function re-nocks the arrow after toggling field_0x301e for the Bomb Arrow combo.
+        if (link->mItemAcKeep.getActor() != NULL) {
+            link->deleteArrow();
+            link->makeArrow();
+            link->setBowReloadAnime();
+        }
+    }
+
+    return HOOK_SKIP_ORIGINAL;
+}
+
+// Runs once, when the bow transitions from not-drawn to freshly drawn back (see
+// SetBowReadyAnime's hook comment above) - checkBowAnime() is checked here, as a pre-hook, the
+// same way the original function itself gates its own field_0x301e reset on it
+// (`if (!checkBowAnime())`) before doing anything else, so this only fires on that same
+// transition, not on every frame the bow stays drawn. Must run before the original: the original
+// sets the very animation state checkBowAnime() reads (via setUpperAnimeBase() further down), so
+// checking it from a post-hook instead would always see the anim it had just set and never detect
+// the transition at all.
+static HookAction on_set_bow_ready_anime_pre(ModContext*, void* args, void*, void*) {
+    daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
+
+    if (checkBowLanternCombo() && !link->checkBowAnime()) {
+        g_fireArrowModeOn = dComIfGs_getOil() != 0;
+    }
+
+    return HOOK_CONTINUE;
 }
 
 // dMeter2Draw_c::SELECT_X_e/SELECT_Y_e (0/1) are the same values checkBowLanternComboInSlot()
@@ -505,7 +592,9 @@ static HookAction on_arrow_shooting_pre(ModContext*, void* args, void*, void*) {
     daArrow_c* arrow = mods::arg<daArrow_c*>(args, 0);
 
     daAlink_c* link = daAlink_getAlinkActorClass();
-    if (link == nullptr || !checkBowLanternCombo() || dComIfGs_getOil() == 0) {
+    if (link == nullptr || !checkBowLanternCombo() || !g_fireArrowModeOn ||
+        dComIfGs_getOil() == 0)
+    {
         return HOOK_CONTINUE;
     }
 
@@ -542,7 +631,7 @@ static HookAction on_arrow_shooting_pre(ModContext*, void* args, void*, void*) {
 // activateFireArrowIgnition), so merely drawing the bow back near a torch can't ignite it.
 static void on_alink_make_arrow_post(ModContext*, void* args, void*, void*) {
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
-    if (!checkBowLanternCombo() || dComIfGs_getOil() == 0) {
+    if (!checkBowLanternCombo() || !g_fireArrowModeOn || dComIfGs_getOil() == 0) {
         return;
     }
 
@@ -635,6 +724,18 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     result = mods::hook::add_pre<DrawKanteraMeter>(on_draw_kantera_meter_pre);
     if (result != MOD_OK) {
         mods::log::error("failed to install pre hook on_draw_kantera_meter_pre");
+        return result;
+    }
+
+    result = mods::hook::add_pre<ChangeArrowType>(on_change_arrow_type_pre);
+    if (result != MOD_OK) {
+        mods::log::error("failed to install pre hook on_change_arrow_type_pre");
+        return result;
+    }
+
+    result = mods::hook::add_pre<SetBowReadyAnime>(on_set_bow_ready_anime_pre);
+    if (result != MOD_OK) {
+        mods::log::error("failed to install pre hook on_set_bow_ready_anime_pre");
         return result;
     }
 
