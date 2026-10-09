@@ -550,14 +550,18 @@ struct BurningActor {
     // lifecycle at all (unlike the arrow, which this mod itself tracks from nock to impact), so it
     // has no other way to notice the original target was deleted out from under a stale pointer.
     fpc_ProcID actorId = fpcM_ERROR_PROCESS_ID_e;
-    // Where on the target's body the arrow actually struck, relative to its origin
-    // (current.pos, usually the ground-level/root point most actors are positioned by) - captured
-    // once at ignite time from the arrow's own collider (see igniteBurningActor below) so the
-    // flame reads as coming from roughly center-mass/wherever it actually hit, not the ground.
-    // Re-added to the target's current.pos every frame (see updateBurningActors), so the flame
-    // still correctly follows the target around as it moves, same as it would if it were parented
-    // to a bone - just without needing an actual bone matrix, which no shared enemy base class
-    // exposes generically.
+    // Where on the target's body the arrow actually struck, relative to its origin (current.pos,
+    // usually the ground-level/root point most actors are positioned by) - captured once at
+    // ignite time from the arrow's own collider (see igniteBurningActor below) so the flame reads
+    // as coming from roughly center-mass/wherever it actually hit, not the ground. Stored in the
+    // target's own local (yaw-relative) space rather than world space - see rotateByActorYaw
+    // below - and re-projected back into world space using the target's current.angle.y plus
+    // current.pos every frame (see updateBurningActors), so the flame correctly turns and moves
+    // with the target's body, same as it would if it were parented to a bone - just using only
+    // the actor's overall yaw rather than an actual bone matrix, which no shared enemy base class
+    // exposes generically. Without this, the flame stayed pinned to its original world-space
+    // direction as the target turned (e.g. to face Link mid-fight), visibly detaching from the
+    // model and appearing to float.
     cXyz hitOffset = {0.0f, 0.0f, 0.0f};
     // Two emitters per burning actor, matching setFirePointDamageEffect's own A/B pair (one for
     // the base flame, one for the sparks/embers on top) rather than a single particle.
@@ -580,6 +584,26 @@ static constexpr int MAX_BURNING_ACTORS = 8;
 static BurningActor g_burningActors[MAX_BURNING_ACTORS];
 static int g_nextBurningActorSlot = 0;
 
+// Rotates i_localOffset (an offset expressed relative to an actor's own facing direction) into
+// world space using only that actor's current yaw (current.angle.y) - the same generic,
+// model-agnostic transform the game's own code already uses whenever it needs to re-attach a
+// fixed offset to an actor that turns in place (e.g. daE_KK_c::executeWalk's
+// mDoMtx_YrotS(*calc_mtx, current.angle.y) + MtxPosition() in d_a_e_kk.cpp), rather than anything
+// Link- or bone-specific. Deliberately ignores pitch/roll (angle.x/.z): nearly every ground actor
+// only ever yaws, and there's no generic (cross-actor-type) way to read a full body-rotation
+// matrix without an actual joint/bone matrix, which is exactly what vanilla's own
+// setFirePointDamageEffect relies on for Link specifically (see the big comment above) and has no
+// enemy-generic equivalent for. Passing -angle.y converts a world-space offset into this same
+// local space (the inverse of a pure Y rotation is just its negation), which is how
+// igniteBurningActor below captures hitOffset in the first place.
+static cXyz rotateByActorYaw(cXyz const& i_localOffset, s16 i_angleY) {
+    Mtx rotMtx;
+    mDoMtx_YrotS(rotMtx, i_angleY);
+    cXyz worldOffset;
+    mDoMtx_multVec(rotMtx, &i_localOffset, &worldOffset);
+    return worldOffset;
+}
+
 // Starts (or refreshes, if already burning) the cosmetic flame on a hit target, anchored at
 // i_hitPos (the arrow's actual impact point on the target, see updateFireArrowEffect's call site)
 // rather than the target's own current.pos. Reuses a free slot (timer == 0) if one exists so an
@@ -592,7 +616,11 @@ static int g_nextBurningActorSlot = 0;
 // or used anywhere else in this file for the same reason.
 static void igniteBurningActor(fopAc_ac_c* actor, cXyz const& i_hitPos) {
     fpc_ProcID id = fpcM_GetID(actor);
-    cXyz offset = i_hitPos - actor->current.pos;
+    // i_hitPos arrives in world space; convert it to the target's own local (yaw-relative) space
+    // immediately (see rotateByActorYaw above and hitOffset's own comment), so
+    // updateBurningActors can re-derive the correct world-space offset every frame regardless of
+    // how the target has turned since.
+    cXyz offset = rotateByActorYaw(i_hitPos - actor->current.pos, -actor->current.angle.y);
 
     for (BurningActor& slot : g_burningActors) {
         if (slot.actor == actor && slot.actorId == id) {
@@ -648,7 +676,8 @@ static void updateBurningActors() {
         slot.timer--;
         slot.velocity = slot.actor->speed;
 
-        cXyz pos = slot.actor->current.pos + slot.hitOffset;
+        cXyz pos = slot.actor->current.pos +
+                   rotateByActorYaw(slot.hitOffset, slot.actor->current.angle.y);
         slot.particleKeyA =
             dComIfGp_particle_set(slot.particleKeyA, ID_ZI_J_LK_BURNS_A, &pos, NULL, NULL);
         slot.particleKeyB =
