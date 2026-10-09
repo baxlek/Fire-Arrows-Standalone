@@ -27,10 +27,12 @@ IMPORT_SERVICE(LogService, svc_log);
 //
 // Lets the player mix the Lantern into the Bow's C-button slot, exactly like the vanilla
 // Bow & Hawkeye combo. While the combo is equipped, arrows are lit on the way out by default,
-// igniting whatever they hit the same way the fire arrows shot by Bulblin (Bokoblin) archers do.
-// Each shot costs the same amount of lantern oil as a single lantern swing. While aiming, the same
-// button press that switches a Bow & Bomb Arrow combo between bomb and normal arrows switches this
-// combo between fire and normal arrows instead.
+// igniting whatever they hit the same way the fire arrows shot by Bulblin (Bokoblin) archers do,
+// and whatever actor they hit briefly catches fire too (a purely cosmetic flame - see
+// igniteBurningActor below for why this doesn't also add extra damage over time). Each shot costs
+// the same amount of lantern oil as a single lantern swing. While aiming, the same button press
+// that switches a Bow & Bomb Arrow combo between bomb and normal arrows switches this combo
+// between fire and normal arrows instead.
 // --------------------------------------------------------------------------------------------
 
 // dComIfGs_getMixItemIndex() returns this when a C-button slot has no item mixed into it.
@@ -419,6 +421,11 @@ struct TrackedFireArrow {
     // flammable objects stays off until then, so merely drawing the bow back near a torch doesn't
     // light it before the shot is actually released.
     bool igniteActive = false;
+    // Set the first time field_0x688 (the arrow's own main collider, not igniteCps) reports a hit
+    // on some actor, so updateFireArrowEffect only starts that target burning cosmetically
+    // (see igniteBurningActor below) once per arrow, rather than every single frame it stays
+    // stuck in whatever it hit (ChkAtHit() stays true the whole time the arrow remains lodged).
+    bool hitActorHandled = false;
 };
 
 // The player only ever has a handful of arrows in flight at once; a small ring buffer is more
@@ -437,6 +444,7 @@ static void initFireArrowSlot(TrackedFireArrow& slot, daArrow_c* arrow, fpc_Proc
     slot.arrowId = id;
     slot.particleKey = 0;
     slot.igniteActive = false;
+    slot.hitActorHandled = false;
     // Same Init() args daArrow_c itself uses for field_0x64c (d_a_arrow.cpp), so the ignition
     // collider's Stts still correctly identifies the arrow as its owning actor - it just doesn't
     // share field_0x688's hit-dedup/apid bookkeeping (see igniteStts's declaration above).
@@ -493,6 +501,133 @@ static bool isArrowStationary(daArrow_c* arrow) {
            arrow->mProcFunc == &daArrow_c::procBGStop ||
            arrow->mProcFunc == &daArrow_c::procActorStop ||
            arrow->mProcFunc == &daArrow_c::procActorControllStop;
+}
+
+// --------------------------------------------------------------------------------------------
+// Cosmetic "on fire" effect for whatever a fire-combo arrow actually hits.
+//
+// This is deliberately cosmetic-only: it does not deal any extra damage, and does not attempt to
+// replicate the bulblin (bokoblin) archer's own fire arrows making *Link* take periodic burn
+// damage (daAlink_c's dCcD_MTRL_FIRE handling in its own damage code, entirely internal to that
+// one class). There's no equivalent generic "deal damage over time"/"apply a burn status" entry
+// point usable against an arbitrary enemy actor - every enemy actor class implements its own HP
+// field and its own reaction to being hit independently, with no shared base class or common
+// damage API to hook once for all of them. The only generic way to actually hurt an arbitrary
+// enemy from outside its own class is to make it believe it was hit by another arrow, which would
+// also replay that enemy's entire hit reaction (flinch animation, hit sound, etc.) on every tick,
+// not a quiet burn - and since most enemies that die to a single normal arrow hit anyway, extra
+// damage-over-time on top would rarely even matter before they're already dead. A purely visual
+// flame, needing nothing from the target beyond its position, avoids all of that.
+// --------------------------------------------------------------------------------------------
+
+// How long (in frames, 60 = 1 second) the cosmetic flame keeps burning on a hit target before it
+// fades out on its own. 120 matches the duration daAlink_c's own wooden shield burn effect uses
+// for its equivalent "still on fire" visual (field_0x2fcb, d_a_alink_damage.inc/d_a_alink.cpp) -
+// long enough to clearly read as "this thing is on fire" without lingering indefinitely.
+static constexpr s16 BURNING_ACTOR_DURATION = 120;
+
+// Tracks a single actor set alight by a fire-combo arrow, so its flame particle can be re-anchored
+// to the target's current position every frame for BURNING_ACTOR_DURATION frames. Kept external
+// (rather than stashed on the target actor itself) for the same reason TrackedFireArrow is kept
+// external to daArrow_c above: there's no spare field on an arbitrary enemy actor to repurpose,
+// and every enemy actor class is laid out differently.
+struct BurningActor {
+    fopAc_ac_c* actor = nullptr;
+    // Same actor-pool address reuse hazard TrackedFireArrow's arrowId guards against (see its
+    // comment above) - except more important here, since this code never owns the target's
+    // lifecycle at all (unlike the arrow, which this mod itself tracks from nock to impact), so it
+    // has no other way to notice the original target was deleted out from under a stale pointer.
+    fpc_ProcID actorId = fpcM_ERROR_PROCESS_ID_e;
+    u32 particleKey = 0;
+    // Handed to the emitter via setUserWork() below; must outlive the emitter itself, so it's
+    // stored here rather than as a stack temporary (same reasoning as TrackedFireArrow::velocity).
+    cXyz velocity = {0.0f, 0.0f, 0.0f};
+    // Frames remaining; 0 means the slot is free. Decremented once per updateBurningActors() call
+    // (i.e. once per mod_update(), once per game frame).
+    s16 timer = 0;
+};
+
+// The player can volley several fire arrows at different targets in quick succession; a small
+// ring buffer comfortably covers that without needing a dynamic container. Sized the same as
+// MAX_TRACKED_FIRE_ARROWS for consistency, since both bound "how many things this mod is actively
+// animating fire on at once".
+static constexpr int MAX_BURNING_ACTORS = 8;
+static BurningActor g_burningActors[MAX_BURNING_ACTORS];
+static int g_nextBurningActorSlot = 0;
+
+// Starts (or refreshes, if already burning) the cosmetic flame on a hit target. Reuses a free slot
+// (timer == 0) if one exists so an actor that's still burning never gets evicted by an unrelated
+// new ignition elsewhere; otherwise evicts the oldest slot in ring-buffer order, exactly like
+// trackFireArrow does for arrows. An evicted slot's particle key is simply abandoned rather than
+// explicitly stopped: like the arrow's own trail particle (see updateFireArrowEffect below), this
+// effect is kept alive purely by being re-issued every frame, so no longer calling
+// dComIfGp_particle_set() for it is already enough for it to stop emitting and fade out on its
+// own - there's no separate "stop" call needed or used anywhere else in this file for the same
+// reason.
+static void igniteBurningActor(fopAc_ac_c* actor) {
+    fpc_ProcID id = fpcM_GetID(actor);
+
+    for (BurningActor& slot : g_burningActors) {
+        if (slot.actor == actor && slot.actorId == id) {
+            slot.timer = BURNING_ACTOR_DURATION;
+            return;
+        }
+    }
+
+    for (BurningActor& slot : g_burningActors) {
+        if (slot.timer == 0) {
+            slot.actor = actor;
+            slot.actorId = id;
+            slot.particleKey = 0;
+            slot.timer = BURNING_ACTOR_DURATION;
+            return;
+        }
+    }
+
+    BurningActor& slot = g_burningActors[g_nextBurningActorSlot];
+    g_nextBurningActorSlot = (g_nextBurningActorSlot + 1) % MAX_BURNING_ACTORS;
+    slot.actor = actor;
+    slot.actorId = id;
+    slot.particleKey = 0;
+    slot.timer = BURNING_ACTOR_DURATION;
+}
+
+// Called once per game frame (from mod_update, see below) to tick down and re-anchor every
+// currently-burning target's flame particle. Deliberately not tied to the arrow's own execute
+// hook (on_arrow_execute_post): the arrow itself is typically deleted (embedded, despawned) long
+// before BURNING_ACTOR_DURATION elapses, but the cosmetic flame on whatever it hit should keep
+// burning independently of the arrow's own lifetime.
+static void updateBurningActors() {
+    for (BurningActor& slot : g_burningActors) {
+        if (slot.timer == 0) {
+            continue;
+        }
+
+        // Same actor-pool address reuse hazard as TrackedFireArrow (see arrowId's comment above):
+        // if the original target was deleted and its slot handed to a new, unrelated actor,
+        // fpcM_GetID() on the (now-stale) pointer will no longer match the ID recorded at ignite
+        // time. Free the slot instead of animating fire on whatever now occupies that address.
+        if (fpcM_GetID(slot.actor) != slot.actorId) {
+            slot.actor = nullptr;
+            slot.timer = 0;
+            continue;
+        }
+
+        slot.timer--;
+        slot.velocity = slot.actor->speed;
+        slot.particleKey = dComIfGp_particle_set(slot.particleKey, ID_ZF_J_FIRE02_FIRE,
+                                                  &slot.actor->current.pos, NULL, NULL);
+
+        JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(slot.particleKey);
+        if (emitter != NULL) {
+            emitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
+            emitter->setUserWork((uintptr_t)&slot.velocity);
+        }
+
+        if (slot.timer == 0) {
+            slot.actor = nullptr;
+        }
+    }
 }
 
 // Called every frame for every live fire arrow (see on_arrow_execute_post). Re-issues the fire
@@ -583,6 +718,28 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
                 }
                 dComIfG_Ccsp()->Set(&slot.igniteCps);
             }
+
+            // field_0x688 is the arrow's own main collider (AT_TYPE_ARROW, unaffected by
+            // igniteActive above), so this fires for any confirmed hit as soon as the arrow is
+            // actually released, independent of whether it also landed near anything ignitable.
+            // ChkAtHit() stays true for as long as the arrow remains lodged in whatever it hit
+            // (there's no per-frame reset, see field_0x688.ResetAtHit()'s own call sites in
+            // d_a_arrow.cpp), so hitActorHandled latches this to a single reaction per arrow
+            // rather than re-igniting the same target every subsequent frame.
+            if (!slot.hitActorHandled && arrow->field_0x688.ChkAtHit()) {
+                slot.hitActorHandled = true;
+
+                fopAc_ac_c* hitActor = arrow->field_0x688.GetAtHitAc();
+                // Excludes the player: a fire arrow striking Link (e.g. an errant shot, or a
+                // reflected/deflected one) already makes him visibly catch fire and take periodic
+                // burn damage through his own, unrelated vanilla mechanism (dCcD_MTRL_FIRE handling
+                // in daAlink_c's own damage code) - layering this purely cosmetic effect on top of
+                // that would just double up the flame visuals on the same target.
+                if (hitActor != NULL && fopAcM_GetName(hitActor) != fpcNm_ALINK_e) {
+                    igniteBurningActor(hitActor);
+                }
+            }
+
             return;
         }
     }
@@ -744,6 +901,7 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
+    updateBurningActors();
     return MOD_OK;
 }
 
