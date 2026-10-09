@@ -532,10 +532,16 @@ static bool isArrowStationary(daArrow_c* arrow) {
 // --------------------------------------------------------------------------------------------
 
 // How long (in frames, 60 = 1 second) the cosmetic flame keeps burning on a hit target before it
-// fades out on its own. 120 matches the duration daAlink_c's own wooden shield burn effect uses
-// for its equivalent "still on fire" visual (field_0x2fcb, d_a_alink_damage.inc/d_a_alink.cpp) -
-// long enough to clearly read as "this thing is on fire" without lingering indefinitely.
-static constexpr s16 BURNING_ACTOR_DURATION = 120;
+// fades out on its own. 300 frames = 5 seconds, long enough to clearly read as "this thing is on
+// fire" for a good while without lingering indefinitely.
+static constexpr s16 BURNING_ACTOR_DURATION = 300;
+
+// Uniformly enlarges the cosmetic flame to 3x its native particle size via setGlobalScale() - the
+// same generic, per-emitter scaling knob the game's own code already uses whenever a particle
+// effect needs to read as bigger than its default size (e.g. d_a_boomerang.cpp's effScale0,
+// d_a_alink_effect.inc's many *Scale locals) - so it's clearly visible as "this enemy is on fire"
+// rather than a faint flicker.
+static const JGeometry::TVec3<f32> BURN_EFFECT_SCALE(3.0f, 3.0f, 3.0f);
 
 // Tracks a single actor set alight by a fire-combo arrow, so its flame particle can be re-anchored
 // to the target's current position every frame for BURNING_ACTOR_DURATION frames. Kept external
@@ -679,6 +685,7 @@ static void updateBurningActors() {
             if (emitter != NULL) {
                 emitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
                 emitter->setUserWork((uintptr_t)&slot.velocity);
+                emitter->setGlobalScale(BURN_EFFECT_SCALE);
             }
         }
 
