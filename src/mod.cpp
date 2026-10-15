@@ -69,7 +69,7 @@ DEFINE_HOOK(&dMenu_Ring_c::setActiveCursor, SetActiveCursor);
 // so our restore also runs before any later mod's own post-hook needs to see the real item again
 // (e.g. to refresh a combo icon from save data, see on_set_mix_item_post below).
 static constexpr HookOptions kDisguiseHookOptions = {
-    sizeof(HookOptions), -1'000'000, HOOK_REPLACE_CONFLICT, nullptr};
+    sizeof(HookOptions), 10'000'000, HOOK_REPLACE_CONFLICT, nullptr};
 
 // Hook target: the moment an arrow is actually released, where the game already special-cases
 // the arrow's attack material per arrow type (see the ARROW_TYPE_LIGHT branch below it in the
