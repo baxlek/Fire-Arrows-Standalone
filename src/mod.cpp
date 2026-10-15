@@ -253,6 +253,112 @@ static bool checkBowLanternCombo() {
     return false;
 }
 
+// Some other mods (e.g. Dawnlight's item_integrity.cpp) guard against the vanilla menu leaving a
+// stale/invalid mix pairing in the save data (something that can otherwise happen by removing an
+// item from a slot that's mixed into another through means other than the combine menu) by
+// re-validating every active Bow mix pairing - straight off the save data's raw item array,
+// bypassing dComIfGp_getSelectItem()'s swap logic entirely - on every single
+// dSv_player_item_c::setItem()/getItem() call, and immediately clearing any pairing their own
+// whitelist doesn't recognize. That whitelist doesn't know about the Lantern either (same gap as
+// the menu whitelists disguised above), so it strips the Bow+Lantern combo the instant such a
+// check next runs, generally within the same frame the combo was formed. We can't edit that
+// check - it's compiled into a different mod and, unlike the menu functions above, isn't one we
+// get to run before via our own pre-hook priority, since it may itself be hooking the exact same
+// two functions - so instead we disguise the Lantern in the save data for the duration of any
+// single setItem()/getItem() call that might run such a check, then restore it right after,
+// exactly like the menu disguise above, just wrapped around a different pair of functions.
+DEFINE_HOOK(&dSv_player_item_c::setItem, PlayerItemSetItem);
+DEFINE_HOOK(&dSv_player_item_c::getItem, PlayerItemGetItem);
+
+// Slot (per X/Y select-item index) temporarily disguised by disguiseActiveCombosPre(), restored
+// by restoreActiveCombosPost(). NO_MIX_ITEM means "nothing to restore" for that index.
+static u8 g_disguisedComboSlots[SELECT_ITEM_NUM];
+
+// A mod's own mix-pair check, while it runs sandwiched between a disguise and its matching
+// restore below, could itself trigger a nested call to setItem()/getItem() (e.g. to apply its own
+// repair to some other, unrelated slot) - which would run this same disguise/restore pair again
+// before the outer call gets a chance to. Only the outermost call should actually touch the save
+// data or g_disguisedComboSlots; an inner, nested call has nothing new to do, since the outer
+// call's disguise (if any) is already in place and is the one responsible for restoring it. This
+// depth counter distinguishes the two cases: disguise only acts, and restore only undoes it, on
+// the 0->1 and 1->0 transitions respectively.
+static int g_disguiseDepth = 0;
+
+// Directly swaps the save data's own item array, rather than going through dComIfGs_setItem()/
+// dSv_player_item_c::setItem(), both to avoid a mod's check seeing a half-restored state if it
+// itself calls setItem() reentrantly, and to avoid recursing back into the very hook(s) this is
+// called from.
+static void disguiseActiveCombosPre(dSv_player_item_c* items) {
+    if (g_disguiseDepth++ > 0) {
+        return;
+    }
+
+    for (int selectItemIdx = 0; selectItemIdx < SELECT_ITEM_NUM; selectItemIdx++) {
+        g_disguisedComboSlots[selectItemIdx] = NO_MIX_ITEM;
+
+        if (dComIfGs_getMixItemIndex(selectItemIdx) != SLOT_4) {
+            continue;
+        }
+
+        u8 partnerSlot = dComIfGs_getSelectItemIndex(selectItemIdx);
+        if (partnerSlot < MAX_ITEM_SLOTS && items->mItems[partnerSlot] == dItemNo_KANTERA_e) {
+            items->mItems[partnerSlot] = dItemNo_HAWK_EYE_e;
+            g_disguisedComboSlots[selectItemIdx] = partnerSlot;
+        }
+    }
+}
+
+static void restoreActiveCombosPost(dSv_player_item_c* items) {
+    if (--g_disguiseDepth > 0) {
+        return;
+    }
+
+    for (int selectItemIdx = 0; selectItemIdx < SELECT_ITEM_NUM; selectItemIdx++) {
+        u8 slot = g_disguisedComboSlots[selectItemIdx];
+        if (slot != NO_MIX_ITEM) {
+            items->mItems[slot] = dItemNo_KANTERA_e;
+            g_disguisedComboSlots[selectItemIdx] = NO_MIX_ITEM;
+        }
+    }
+}
+
+// setItem() is only ever hooked post by other mods' own integrity checks (there's nothing in the
+// save data for them to check before the new item is actually written), so our own disguise and
+// restore both have to run as post-hooks too, bracketing theirs: disguise with a priority high
+// enough to run before any such check that (like Dawnlight's) registers at the default priority
+// (0), restore with a priority low enough to run after it, so the real item is back before any
+// other, later-running post-hook (or the function's caller) can observe the disguise.
+static constexpr HookOptions kIntegrityDisguiseFirstOptions = {
+    sizeof(HookOptions), 1'000'000, HOOK_REPLACE_CONFLICT, nullptr};
+static constexpr HookOptions kIntegrityRestoreLastOptions = {
+    sizeof(HookOptions), -1'000'000, HOOK_REPLACE_CONFLICT, nullptr};
+
+static void on_player_item_set_item_disguise_post(ModContext*, void* args, void*, void*) {
+    disguiseActiveCombosPre(mods::arg<dSv_player_item_c*>(args, 0));
+}
+
+static void on_player_item_set_item_restore_post(ModContext*, void* args, void*, void*) {
+    restoreActiveCombosPost(mods::arg<dSv_player_item_c*>(args, 0));
+}
+
+// getItem() is only ever hooked pre by other mods' own integrity checks (any repair they make has
+// to land before the value is actually read out), so both the disguise and the restore run as
+// pre-hooks here instead, bracketing theirs the same way: disguise first (same high priority as
+// above, so it also runs ahead of a default-priority check), then restore with a priority still
+// low enough to run after that check but - crucially - before the real getItem() body, so its
+// return value is never affected by the disguise at all.
+static HookAction on_player_item_get_item_disguise_pre(ModContext*, void* args, void*, void*) {
+    auto* items = const_cast<dSv_player_item_c*>(mods::arg<const dSv_player_item_c*>(args, 0));
+    disguiseActiveCombosPre(items);
+    return HOOK_CONTINUE;
+}
+
+static HookAction on_player_item_get_item_restore_pre(ModContext*, void* args, void*, void*) {
+    auto* items = const_cast<dSv_player_item_c*>(mods::arg<const dSv_player_item_c*>(args, 0));
+    restoreActiveCombosPost(items);
+    return HOOK_CONTINUE;
+}
+
 // Whether the Bow+Lantern combo should currently light its arrows on release (true) or shoot
 // plain arrows while leaving the Lantern's oil untouched (false). Mirrors the vanilla Bomb Arrow
 // combo's own field_0x301e toggle, except tracked externally here rather than reusing that field,
@@ -1047,6 +1153,34 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     result = mods::hook::add_pre<SetBowReadyAnime>(on_set_bow_ready_anime_pre);
     if (result != MOD_OK) {
         mods::log::error("failed to install pre hook on_set_bow_ready_anime_pre");
+        return result;
+    }
+
+    result = mods::hook::add_post<PlayerItemSetItem>(
+        on_player_item_set_item_disguise_post, &kIntegrityDisguiseFirstOptions);
+    if (result != MOD_OK) {
+        mods::log::error("failed to install post hook on_player_item_set_item_disguise_post");
+        return result;
+    }
+
+    result = mods::hook::add_post<PlayerItemSetItem>(
+        on_player_item_set_item_restore_post, &kIntegrityRestoreLastOptions);
+    if (result != MOD_OK) {
+        mods::log::error("failed to install post hook on_player_item_set_item_restore_post");
+        return result;
+    }
+
+    result = mods::hook::add_pre<PlayerItemGetItem>(
+        on_player_item_get_item_disguise_pre, &kIntegrityDisguiseFirstOptions);
+    if (result != MOD_OK) {
+        mods::log::error("failed to install pre hook on_player_item_get_item_disguise_pre");
+        return result;
+    }
+
+    result = mods::hook::add_pre<PlayerItemGetItem>(
+        on_player_item_get_item_restore_pre, &kIntegrityRestoreLastOptions);
+    if (result != MOD_OK) {
+        mods::log::error("failed to install pre hook on_player_item_get_item_restore_pre");
         return result;
     }
 
