@@ -180,8 +180,25 @@ static HookAction on_set_active_cursor_pre(ModContext*, void* args, void*, void*
     return HOOK_CONTINUE;
 }
 
-static void on_set_active_cursor_post(ModContext*, void*, void*, void*) {
+static void on_set_active_cursor_post(ModContext*, void* args, void*, void*) {
+    bool wasDisguised = g_disguisedItemSlot != NO_MIX_ITEM;
     restoreLanternPost();
+
+    // Mirrors on_set_mix_item_post's own fix above, for a different code path: pressing X/Y while
+    // the Lantern is highlighted (with no combine in progress) runs setActiveCursor's own plain
+    // assign branch, which calls dMenu_Ring_c::setItem() (distinct from the free function
+    // dComIfGs_setItem()). That function - like setMixItem() - reloads the sliding assign-icon
+    // texture from save data (via its own trailing setJumpItem(true) call; setMixItem() uses false,
+    // see above) before this post-hook ever runs, so it captures the disguised Hawkeye icon instead
+    // of the Lantern's. Re-calling it now that the real item is back reloads the correct icon, the
+    // same way on_set_mix_item_post does for the combine case. Only needed if this call actually
+    // disguised something: when setActiveCursor's own combine branch is taken instead, it calls
+    // dMenu_Ring_c::setMixItem() internally, which runs through our own SetMixItem hook (including
+    // on_set_mix_item_post) and already restores/refreshes the icon itself before control returns
+    // here, consuming g_disguisedItemSlot in the process.
+    if (wasDisguised) {
+        mods::arg<dMenu_Ring_c*>(args, 0)->setJumpItem(true);
+    }
 }
 
 // True if the Bow is assigned to one of the two C-button slots and the Lantern is mixed into it,
