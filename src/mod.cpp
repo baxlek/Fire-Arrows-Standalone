@@ -2,6 +2,8 @@
 #include "mods/svc/hook.hpp"
 #include "mods/svc/log.hpp"
 
+#include <cstring>
+
 // Game includes
 #include "Z2AudioLib/Z2AudioMgr.h"
 #include "Z2AudioLib/Z2SeMgr.h"
@@ -838,6 +840,46 @@ static constexpr f32 NOCKED_FLAME_SCALE = 1.0f / 3.0f;
 // halo proportional to the arrow's own small flame instead.
 static constexpr f32 GLOW_SCALE_FACTOR = 0.5f;
 
+// dKy_BossLight_set's shared pool (see FIRE_ARROW_BOSSLIGHT_COLOR above) only has 5 general-use
+// slots (kankyo->field_0x0c18 indices 1-5; index 0 is the Lantern/Wolf-eye's own reserved slot),
+// and when full it evicts whichever existing entry is currently farthest from the camera to make
+// room for a new one - with up to 5 fire arrows now also competing for those same slots, that
+// eviction could (and did, per playtesting) silently snuff out a real nearby lit candle/torch/
+// firewood's terrain light to make room for an arrow's. The engine has no per-caller reservation
+// system to fix this with more slots (field_0x0c18 is a fixed-size member of the already-compiled
+// dScnKy_env_light_c, not something this mod's build - which only compiles against Dusklight's sdk/
+// headers, not the engine itself - can resize), so instead of fighting over the existing 5 slots,
+// this mod simply never forces that eviction itself: it only calls dKy_BossLight_set for an arrow
+// when a slot is already free, leaving every other active light (vanilla or otherwise) alone. This
+// mirrors dKy_BossLight_set's own slot-counting (including the stage_light_info_num room reservation
+// and the F_SP118/no-room-data edge cases) closely enough to know in advance whether its call would
+// have to evict something, without actually calling it and finding out.
+static bool fireArrowBossLightSlotIsFree() {
+    dScnKy_env_light_c* kankyo = dKy_getEnvlight();
+
+    int stageLightInfoNum = 0;
+    if (strcmp(dComIfGp_getStartStageName(), "F_SP118") != 0) {
+        dStage_roomDt_c* roomDt =
+            dComIfGp_roomControl_getStatusRoomDt(dComIfGp_roomControl_getStayNo());
+        if (roomDt == NULL) {
+            // dKy_BossLight_set itself bails out (returns 0) in this same situation, so there's
+            // never a free slot to claim here either.
+            return false;
+        }
+        stageLightInfoNum = roomDt->getLightVecInfoNum();
+        if (stageLightInfoNum < 0 || stageLightInfoNum > 6) {
+            stageLightInfoNum = 6;
+        }
+    }
+
+    for (int i = 1; i < 6 - stageLightInfoNum; i++) {
+        if (kankyo->field_0x0c18[i].field_0x26 == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Also re-anchors the ignition collider (see l_igniteSphSrc above) to the arrow's current
 // position every frame, the same way the arrow's own "stuck in wall" collider (field_0x7cc) is
 // simply re-issued at current.pos each frame rather than swept.
@@ -925,9 +967,16 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
             // that visibly brightens nearby terrain, as a companion to the plight above. Must be
             // re-issued every frame (unlike dKy_plight_set's register-once pattern), since the
             // engine clears this slot array itself each frame before any of this frame's callers
-            // get a chance to re-claim it.
-            GXColor bossLightColor = FIRE_ARROW_BOSSLIGHT_COLOR;
-            dKy_BossLight_set(&arrow->field_0x9cc, &bossLightColor, FIRE_ARROW_BOSSLIGHT_REF_DIST, 0);
+            // get a chance to re-claim it. Only claimed when a slot is actually free (see
+            // fireArrowBossLightSlotIsFree above) so an arrow's own terrain light never evicts an
+            // already-lit vanilla fixture (or another arrow's) out of the shared, fixed-size pool -
+            // the trade-off is that once every slot is legitimately taken, a newly-ignited arrow
+            // simply won't get one of its own that frame, rather than stealing someone else's.
+            if (fireArrowBossLightSlotIsFree()) {
+                GXColor bossLightColor = FIRE_ARROW_BOSSLIGHT_COLOR;
+                dKy_BossLight_set(&arrow->field_0x9cc, &bossLightColor, FIRE_ARROW_BOSSLIGHT_REF_DIST,
+                                   0);
+            }
 
             if (slot.igniteActive) {
                 // A capsule (unlike a sphere) needs actual endpoints, not just a center + radius:
