@@ -400,6 +400,28 @@ static constexpr f32 FIRE_ARROW_LIGHT_FLUCTUATION = 1.0f;
 // compared to those fixtures (and, loosely, the player's own Lantern).
 static constexpr f32 FIRE_ARROW_LIGHT_POW = 250.0f;
 
+// dKy_BossLight_set registers a real GX hardware spotlight/point light (daAlink_c::setLight's own
+// Lantern glow uses the same underlying mechanism via dKy_WolfEyeLight_set, which always claims
+// index 0 of the same slot array) that dScnKy_env_light_c::exeKankyo() actually turns into
+// per-vertex GX lighting for BG materials during the frame's real BG draw - unlike the
+// LIGHT_INFLUENCE/dKy_plight_set companion above, this is what makes the Lantern (and vanilla fire
+// fixtures below) visibly brighten ordinary terrain/walls, not just nearby actors. Every stationary
+// fire source that pairs a plight with a GLOW particle (daLv1Cdl00_c/01_c, daLv2Candle_c,
+// daLv3Candle_c, daFireWood2_c, daPoCandle_c, dT_myna_light_c) also calls dKy_BossLight_set every
+// single frame with this same (0xBC, 0x66, 0x42) color - same color as FIRE_ARROW_LIGHT_COLOR
+// above, just as a plain 8-bit-per-channel GXColor instead of LIGHT_INFLUENCE's GXColorS10.
+static constexpr GXColor FIRE_ARROW_BOSSLIGHT_COLOR = {0xBC, 0x66, 0x42, 0xFF};
+// Unlike dKy_plight_set (register once, then just mutate mPosition forever), the BOSS_LIGHT slot
+// array is wiped every single frame by exeKankyo() before being repopulated by whichever
+// actors/effects call dKy_BossLight_set() that frame - so there's no "lazy register once" flag
+// here, it simply has to be called again every frame the flame is showing, same as every vanilla
+// caller above (most of which ramp this value in GXColor's "ref_dist" param via cLib_addCalc from
+// 0.0f to 1.0f, used as a GX_DA_STEEP falloff reference distance rather than a literal unit
+// measurement). All of those stationary fixtures settle at exactly 1.0f once fully lit; half that,
+// consistent with FIRE_ARROW_LIGHT_POW's own halving above, keeps this noticeably smaller than
+// those fixtures (and, loosely, the player's own Lantern) rather than guessing at a new scale.
+static constexpr f32 FIRE_ARROW_BOSSLIGHT_REF_DIST = 0.5f;
+
 // Tracks the fire trail particle and ignition collider for the player's own in-flight fire
 // arrows, so both can be re-anchored to each arrow's current position every frame (see
 // updateFireArrowEffect below). daArrow_c has no spare fields to stash these in, unlike the enemy
@@ -456,8 +478,11 @@ struct TrackedFireArrow {
     // frame without ever calling dKy_plight_set() again. This only ever produces a visible effect
     // on nearby actors/Link's own model and the handful of specially-authored BG materials that
     // opt into point-light shading (dScnKy_env_light_c::settingTevStruct's TEV_TYPE_BG*_PLIGHT
-    // path) - it never visibly brightens ordinary terrain - so it's a faithful-but-subtle
-    // engine-level companion to glowParticleKey above, not the actual glow players will notice.
+    // path) - it never visibly brightens ordinary terrain on its own, which is what the
+    // dKy_BossLight_set call alongside it in updateFireArrowEffect (see
+    // FIRE_ARROW_BOSSLIGHT_COLOR/FIRE_ARROW_BOSSLIGHT_REF_DIST above) is for instead - so this
+    // LIGHT_INFLUENCE remains a faithful-but-subtle actor/Link-only companion to glowParticleKey
+    // and the real terrain-lighting BossLight call, not a substitute for either.
     LIGHT_INFLUENCE light;
     // True once dKy_plight_set(&light) has actually been called for this slot. Sentinels both
     // "this slot's light is currently registered with the engine and needs dKy_plight_cut() before
@@ -793,13 +818,15 @@ static void updateBurningActors() {
 // per-room-pack bit) pair that every stationary fire source in the game (torches in
 // d_a_obj_ktOnFire.cpp, campfires in d_a_obj_fireWood[2].cpp, candles in
 // d_a_obj_lv1Candle0[01].cpp) spawns together as their actual visible flame outside of rooms with
-// a fancier room-specific variant loaded. The GLOW particle in particular is what reads as
-// "illumination" to the player - the LIGHT_INFLUENCE point light below (FIRE_ARROW_LIGHT_COLOR/
-// FIRE_ARROW_LIGHT_POW) only tints nearby actors/Link's own model and a handful of specially-
-// authored BG materials, it doesn't brighten ordinary terrain, so GLOW is what actually has to
-// carry the "lit up" look. The previous attempt (ID_IT_JN_ARWFIR_FIRE00) is a dead resource ID
-// never referenced anywhere else in the game and never actually renders regardless of which pack
-// is loaded.
+// a fancier room-specific variant loaded. The GLOW particle is the close-up "lit up" look the
+// player actually sees around the flame itself; the LIGHT_INFLUENCE point light below
+// (FIRE_ARROW_LIGHT_COLOR/FIRE_ARROW_LIGHT_POW) only ever tints nearby actors/Link's own model and
+// a handful of specially-authored BG materials - the dKy_BossLight_set call further below
+// (FIRE_ARROW_BOSSLIGHT_COLOR/FIRE_ARROW_BOSSLIGHT_REF_DIST) is what actually brightens ordinary
+// terrain/walls around the arrow, the same way every one of those vanilla fixtures (and the
+// player's own Lantern) does it. The previous attempt (ID_IT_JN_ARWFIR_FIRE00) is a dead resource
+// ID never referenced anywhere else in the game and never actually renders regardless of which
+// pack is loaded.
 //
 // While the arrow is nocked (waiting to be released), the flame is drawn just in front of the
 // player's face and at the full "impact-sized" scale would cover most of the first-person aiming
@@ -892,6 +919,15 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
                 dKy_plight_set(&slot.light);
                 slot.lightActive = true;
             }
+
+            // See FIRE_ARROW_BOSSLIGHT_COLOR/FIRE_ARROW_BOSSLIGHT_REF_DIST above - this is the
+            // actual mechanism (shared with every vanilla fire fixture and the Lantern itself)
+            // that visibly brightens nearby terrain, as a companion to the plight above. Must be
+            // re-issued every frame (unlike dKy_plight_set's register-once pattern), since the
+            // engine clears this slot array itself each frame before any of this frame's callers
+            // get a chance to re-claim it.
+            GXColor bossLightColor = FIRE_ARROW_BOSSLIGHT_COLOR;
+            dKy_BossLight_set(&arrow->field_0x9cc, &bossLightColor, FIRE_ARROW_BOSSLIGHT_REF_DIST, 0);
 
             if (slot.igniteActive) {
                 // A capsule (unlike a sphere) needs actual endpoints, not just a center + radius:
