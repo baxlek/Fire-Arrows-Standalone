@@ -10,6 +10,7 @@
 #include "d/d_cc_d.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_item_data.h"
+#include "d/d_kankyo.h"
 #include "d/d_menu_ring.h"
 #include "d/d_meter2_draw.h"
 #include "d/d_particle_name.h"
@@ -383,6 +384,22 @@ static const dCcD_SrcCps l_igniteCpsSrc = {
     }                                                    // mCpsAttr
 };
 
+// Color and flicker for the fire arrow's own point light (see TrackedFireArrow::light below),
+// matching the exact warm orange every stationary fire source in the game registers for itself -
+// e.g. daKtOnFire_c ("Lantern Fire", the wall-mounted dungeon lantern/torch fixture,
+// d_a_obj_ktOnFire.cpp lightInit()), daFireWood_c (d_a_obj_fireWood.cpp lightInit()) and
+// daLv1Cdl01_c (d_a_obj_lv1Candle01.cpp lightInit()) all set mColor to this same (0xBC, 0x66,
+// 0x42) and mFluctuation to 1.0f, so reusing it here reads as the same kind of flame rather than
+// an unrelated new light color.
+static constexpr GXColorS10 FIRE_ARROW_LIGHT_COLOR = {0xBC, 0x66, 0x42, 0xFF};
+static constexpr f32 FIRE_ARROW_LIGHT_FLUCTUATION = 1.0f;
+// Every stationary fire source above uses mPow = 500.0f regardless of how big its actual flame
+// is (a torch and a single candle both light up the same radius), so there's no existing "small
+// flame" constant to borrow. Half that keeps the arrow's own fire trail reading as the same kind
+// of light while still being noticeably smaller, matching the request for a reduced radius
+// compared to those fixtures (and, loosely, the player's own Lantern).
+static constexpr f32 FIRE_ARROW_LIGHT_POW = 250.0f;
+
 // Tracks the fire trail particle and ignition collider for the player's own in-flight fire
 // arrows, so both can be re-anchored to each arrow's current position every frame (see
 // updateFireArrowEffect below). daArrow_c has no spare fields to stash these in, unlike the enemy
@@ -426,6 +443,20 @@ struct TrackedFireArrow {
     // (see igniteBurningActor below) once per arrow, rather than every single frame it stays
     // stuck in whatever it hit (ChkAtHit() stays true the whole time the arrow remains lodged).
     bool hitActorHandled = false;
+    // Point light illuminating the arrow's surroundings (see updateFireArrowEffect below),
+    // mirroring how every stationary fire source in the game registers its own LIGHT_INFLUENCE -
+    // see FIRE_ARROW_LIGHT_COLOR/FIRE_ARROW_LIGHT_POW above for why these particular values. Only
+    // mPosition changes frame to frame; dKy_plight_set() hands the engine this struct's address
+    // once (see lightActive below) and it's read live off of that address from then on, the same
+    // way e.g. daE_FM_c's own moving mPlight (d_a_e_fm.cpp) just mutates mPosition in place every
+    // frame without ever calling dKy_plight_set() again.
+    LIGHT_INFLUENCE light;
+    // True once dKy_plight_set(&light) has actually been called for this slot. Sentinels both
+    // "this slot's light is currently registered with the engine and needs dKy_plight_cut() before
+    // being repurposed or abandoned" (see initFireArrowSlot and updateFireArrows below) and
+    // "light.mPosition/mColor/mPow haven't been initialized yet", so dKy_plight_set() is only ever
+    // called the first frame this slot's flame actually shows, not every frame it's re-anchored.
+    bool lightActive = false;
 };
 
 // The player only ever has a handful of arrows in flight at once; a small ring buffer is more
@@ -440,6 +471,17 @@ static int g_nextFireArrowSlot = 0;
 // can't accidentally skip it for what's actually a brand new arrow instance (see arrowId's comment
 // on TrackedFireArrow above).
 static void initFireArrowSlot(TrackedFireArrow& slot, daArrow_c* arrow, fpc_ProcID id) {
+    // Cuts whatever light this slot's previous occupant (a different arrow instance that just
+    // happened to share this address, or this same arrow's own earlier shot - see arrowId's
+    // comment above) left registered, so re-purposing the slot for a brand new arrow can't leave
+    // a stray light frozen at the old occupant's last position. Mirrors the liveness check in
+    // updateFireArrows below, which handles the other way a slot's light can go stale (the arrow
+    // itself despawning without this slot ever being reused).
+    if (slot.lightActive) {
+        dKy_plight_cut(&slot.light);
+        slot.lightActive = false;
+    }
+
     slot.arrow = arrow;
     slot.arrowId = id;
     slot.particleKey = 0;
@@ -789,6 +831,23 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
                 emitter->setGlobalParticleScale(scale, scale);
             }
 
+            // Illuminates the arrow's surroundings the same way every other visible flame in the
+            // game does (see FIRE_ARROW_LIGHT_COLOR/FIRE_ARROW_LIGHT_POW above), re-anchored to the
+            // same tip position as the trail particle above. Registered once lazily (the first
+            // frame the arrow's flame actually shows, whether nocked or already flying) rather
+            // than at trackFireArrow() time, so a light never ends up registered for an arrow that
+            // was tracked but never actually got this far (there's no such path today, but this
+            // keeps the lazy-init pattern consistent with the particle key above, which is also
+            // only ever actually assigned here).
+            slot.light.mPosition = arrow->field_0x9cc;
+            if (!slot.lightActive) {
+                slot.light.mColor = FIRE_ARROW_LIGHT_COLOR;
+                slot.light.mPow = FIRE_ARROW_LIGHT_POW;
+                slot.light.mFluctuation = FIRE_ARROW_LIGHT_FLUCTUATION;
+                dKy_plight_set(&slot.light);
+                slot.lightActive = true;
+            }
+
             if (slot.igniteActive) {
                 // A capsule (unlike a sphere) needs actual endpoints, not just a center + radius:
                 // Set() the same way field_0x688 does every frame in setArrowAt() (d_a_arrow.cpp),
@@ -878,6 +937,25 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
             }
 
             return;
+        }
+    }
+}
+
+// Called once per game frame (from mod_update, see below), independently of any particular
+// arrow's own execute hook, to cut the point light for any tracked slot whose arrow has actually
+// been deleted (embedded-forever arrows aside, eventually despawned/recycled by the actor pool)
+// without that slot ever being reused by a new fire arrow at the same address. Without this, such
+// a light would stay registered with the engine - and visibly lit - at its last position
+// indefinitely, since dKy_plight_set()'d lights (unlike the self-terminating trail particle) don't
+// expire on their own. Uses the same fopAcM_SearchByID()-based liveness check as
+// updateBurningActors above, for the same reason: fpcM_GetID() on a stored pointer can't tell "the
+// arrow is gone" from "the arrow is still here", since fopAcM_delete() never clears the freed
+// memory (see BurningActor::actorId's own comment above).
+static void updateFireArrows() {
+    for (TrackedFireArrow& slot : g_fireArrows) {
+        if (slot.lightActive && fopAcM_SearchByID(slot.arrowId) == NULL) {
+            dKy_plight_cut(&slot.light);
+            slot.lightActive = false;
         }
     }
 }
@@ -1039,6 +1117,7 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 
 MOD_EXPORT ModResult mod_update(ModError*) {
     updateBurningActors();
+    updateFireArrows();
     return MOD_OK;
 }
 
