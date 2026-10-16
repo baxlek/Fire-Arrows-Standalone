@@ -846,7 +846,16 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
             if (emitter != NULL) {
                 emitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
                 emitter->setUserWork((uintptr_t)&slot.velocity);
-                emitter->setGlobalParticleScale(scale, scale);
+                // setGlobalParticleScale only shrinks each already-spawned particle's rendered
+                // billboard size (mGlobalPScl) - it leaves the emitter's own spawn volume
+                // (mGlobalScl, the dynamics scale baked into its world matrix in
+                // JPAResource.cpp/calcEmitterGlobalPosition) untouched, so at NOCKED_FLAME_SCALE
+                // particles still spawn spread across the resource's full torch-sized volume,
+                // just rendered as smaller sprites - visually a diffuse cloud no longer centered
+                // tightly on field_0x9cc/the point light below. setGlobalScale() scales both the
+                // spawn volume and the particle size together, keeping the flame compact and
+                // centered on the same point the light uses at any scale.
+                emitter->setGlobalScale(JGeometry::TVec3<f32>(scale, scale, scale));
             }
 
             // The actual visible "illumination" - see GLOW_SCALE_FACTOR/NOCKED_FLAME_SCALE above
@@ -860,8 +869,11 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
             if (glowEmitter != NULL) {
                 glowEmitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
                 glowEmitter->setUserWork((uintptr_t)&slot.velocity);
+                // See the FIRE emitter's setGlobalScale comment above - same reasoning applies
+                // here so the glow halo stays centered on field_0x9cc instead of spreading across
+                // its full authored (torch-sized) volume while nocked.
                 f32 glowScale = scale * GLOW_SCALE_FACTOR;
-                glowEmitter->setGlobalParticleScale(glowScale, glowScale);
+                glowEmitter->setGlobalScale(JGeometry::TVec3<f32>(glowScale, glowScale, glowScale));
             }
 
             // Illuminates the arrow's surroundings the same way every other visible flame in the
