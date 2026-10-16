@@ -420,6 +420,10 @@ struct TrackedFireArrow {
     // actually distinguishes these two cases - see trackFireArrow below.
     fpc_ProcID arrowId = fpcM_ERROR_PROCESS_ID_e;
     u32 particleKey = 0;
+    // The actual visible "glow" halo players perceive around any lit fire source in the game -
+    // see glowParticleKey's own setup in updateFireArrowEffect below for why this, not the plight
+    // in FIRE_ARROW_LIGHT_COLOR/LIGHT_INFLUENCE below, is what makes the effect actually visible.
+    u32 glowParticleKey = 0;
     // Handed to the emitter via setUserWork() below; must outlive the emitter itself, so it's
     // stored here rather than as a stack temporary.
     cXyz velocity = {0.0f, 0.0f, 0.0f};
@@ -449,7 +453,11 @@ struct TrackedFireArrow {
     // mPosition changes frame to frame; dKy_plight_set() hands the engine this struct's address
     // once (see lightActive below) and it's read live off of that address from then on, the same
     // way e.g. daE_FM_c's own moving mPlight (d_a_e_fm.cpp) just mutates mPosition in place every
-    // frame without ever calling dKy_plight_set() again.
+    // frame without ever calling dKy_plight_set() again. This only ever produces a visible effect
+    // on nearby actors/Link's own model and the handful of specially-authored BG materials that
+    // opt into point-light shading (dScnKy_env_light_c::settingTevStruct's TEV_TYPE_BG*_PLIGHT
+    // path) - it never visibly brightens ordinary terrain - so it's a faithful-but-subtle
+    // engine-level companion to glowParticleKey above, not the actual glow players will notice.
     LIGHT_INFLUENCE light;
     // True once dKy_plight_set(&light) has actually been called for this slot. Sentinels both
     // "this slot's light is currently registered with the engine and needs dKy_plight_cut() before
@@ -485,6 +493,7 @@ static void initFireArrowSlot(TrackedFireArrow& slot, daArrow_c* arrow, fpc_Proc
     slot.arrow = arrow;
     slot.arrowId = id;
     slot.particleKey = 0;
+    slot.glowParticleKey = 0;
     slot.igniteActive = false;
     slot.hitActorHandled = false;
     // Same Init() args daArrow_c itself uses for field_0x64c (d_a_arrow.cpp), so the ignition
@@ -779,18 +788,28 @@ static void updateBurningActors() {
 // position in between frames, so the trail can lag behind or, if re-issued too infrequently
 // relative to the arrow's speed, appear to not be there at all.
 //
-// The particle resource used is ID_ZF_J_FIRE02_FIRE, the common (always-resident, never behind
-// dPa_RM's per-room-pack bit) flame particle that lit torches (d_a_obj_ktOnFire.cpp), campfires
-// (d_a_obj_fireWood[2].cpp) and other fire objects across the game all fall back to using outside
-// of rooms with a fancier room-specific variant loaded - i.e. the general-purpose "open flame"
-// effect that's guaranteed to actually spawn in any area, unlike the previous attempt
-// (ID_IT_JN_ARWFIR_FIRE00), which - it turns out - is a dead resource ID never referenced anywhere
-// else in the game and never actually renders regardless of which pack is loaded.
+// The particle resources used are ID_ZF_J_FIRE02_FIRE (the flame itself) and ID_ZF_J_FIRE00_GLOW
+// (the soft additive halo around it) - the common (always-resident, never behind dPa_RM's
+// per-room-pack bit) pair that every stationary fire source in the game (torches in
+// d_a_obj_ktOnFire.cpp, campfires in d_a_obj_fireWood[2].cpp, candles in
+// d_a_obj_lv1Candle0[01].cpp) spawns together as their actual visible flame outside of rooms with
+// a fancier room-specific variant loaded. The GLOW particle in particular is what reads as
+// "illumination" to the player - the LIGHT_INFLUENCE point light below (FIRE_ARROW_LIGHT_COLOR/
+// FIRE_ARROW_LIGHT_POW) only tints nearby actors/Link's own model and a handful of specially-
+// authored BG materials, it doesn't brighten ordinary terrain, so GLOW is what actually has to
+// carry the "lit up" look. The previous attempt (ID_IT_JN_ARWFIR_FIRE00) is a dead resource ID
+// never referenced anywhere else in the game and never actually renders regardless of which pack
+// is loaded.
 //
 // While the arrow is nocked (waiting to be released), the flame is drawn just in front of the
 // player's face and at the full "impact-sized" scale would cover most of the first-person aiming
 // view. Everywhere else (flying, or stuck after landing) keeps the normal, unscaled size.
 static constexpr f32 NOCKED_FLAME_SCALE = 1.0f / 3.0f;
+// The GLOW particle on its own authored scale reads as roughly as large as a torch's, which would
+// look oversized next to a single arrow's flame and overpower the "smaller than the Lantern"
+// radius the point light above already uses. Shrinking it relative to the FIRE particle keeps the
+// halo proportional to the arrow's own small flame instead.
+static constexpr f32 GLOW_SCALE_FACTOR = 0.5f;
 
 // Also re-anchors the ignition collider (see l_igniteSphSrc above) to the arrow's current
 // position every frame, the same way the arrow's own "stuck in wall" collider (field_0x7cc) is
@@ -823,12 +842,26 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
                                       &arrow->field_0x9cc, &arrow->shape_angle, NULL);
 
             JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(slot.particleKey);
+            f32 scale = arrow->mProcFunc == &daArrow_c::procWait ? NOCKED_FLAME_SCALE : 1.0f;
             if (emitter != NULL) {
                 emitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
                 emitter->setUserWork((uintptr_t)&slot.velocity);
-
-                f32 scale = arrow->mProcFunc == &daArrow_c::procWait ? NOCKED_FLAME_SCALE : 1.0f;
                 emitter->setGlobalParticleScale(scale, scale);
+            }
+
+            // The actual visible "illumination" - see GLOW_SCALE_FACTOR/NOCKED_FLAME_SCALE above
+            // for why it's scaled down from its authored (torch-sized) look, and the comment on
+            // ID_ZF_J_FIRE02_FIRE above for why the point light below isn't enough on its own.
+            slot.glowParticleKey =
+                dComIfGp_particle_set(slot.glowParticleKey, ID_ZF_J_FIRE00_GLOW,
+                                      &arrow->field_0x9cc, &arrow->shape_angle, NULL);
+
+            JPABaseEmitter* glowEmitter = dComIfGp_particle_getEmitter(slot.glowParticleKey);
+            if (glowEmitter != NULL) {
+                glowEmitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
+                glowEmitter->setUserWork((uintptr_t)&slot.velocity);
+                f32 glowScale = scale * GLOW_SCALE_FACTOR;
+                glowEmitter->setGlobalParticleScale(glowScale, glowScale);
             }
 
             // Illuminates the arrow's surroundings the same way every other visible flame in the
