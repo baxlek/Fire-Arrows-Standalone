@@ -497,7 +497,7 @@ struct TrackedFireArrow {
     // flame is currently one of the (at most 5) terrain lights actually brightening nearby BG, not
     // just the subtler actor/Link-only plight above. Used purely to pick an eviction candidate
     // when the pool is full (see findOldestFireArrowEffect below); cleared again once that slot's
-    // own effect is despawned, so it's never picked a second time.
+    // BossLight claim is given up, so it's never picked a second time.
     bool bossLightActive = false;
     // Monotonically increasing registration order, assigned once in initFireArrowSlot and never
     // touched again for the lifetime of this tracked arrow. g_fireArrows is a ring buffer indexed
@@ -506,12 +506,16 @@ struct TrackedFireArrow {
     // effect" apart from "slot that merely happens to sit earliest in the array". A dedicated
     // counter does.
     u32 age = 0;
-    // Set once this slot's cosmetic flame/light/terrain-light trio has been deliberately shut off
-    // to free up a BossLight pool slot for a newer arrow (see findOldestFireArrowEffect and
-    // despawnFireArrowEffect below). The arrow itself keeps flying/embedding/igniting things
-    // completely normally once this is set - only updateFireArrowEffect's particle/plight/
-    // BossLight block is skipped from then on for this slot.
-    bool effectDespawned = false;
+    // Set once this slot has deliberately given up its claim on a BossLight pool slot to make room
+    // for a newer arrow (see findOldestFireArrowEffect and despawnFireArrowEffect below). Only
+    // gates the BossLight re-acquisition attempt in updateFireArrowEffect below - the cosmetic
+    // flame/glow particles and the actor/Link-only plight keep running completely normally once
+    // this is set, the same as an arrow that never got a BossLight slot in the first place; only
+    // this slot's own claim on the shared terrain-light pool is affected, permanently (this never
+    // gets reset back to false for the same tracked arrow, so a once-evicted arrow's flame stays
+    // lit but never competes for a BossLight slot again - consistent with how the pool's own
+    // eviction-by-camera-distance never un-evicts a vanilla fixture mid-flight either).
+    bool bossLightGivenUp = false;
 };
 
 // The player only ever has a handful of arrows in flight at once; a small ring buffer is more
@@ -548,7 +552,7 @@ static void initFireArrowSlot(TrackedFireArrow& slot, daArrow_c* arrow, fpc_Proc
     slot.hitActorHandled = false;
     slot.bossLightActive = false;
     slot.age = g_nextFireArrowAge++;
-    slot.effectDespawned = false;
+    slot.bossLightGivenUp = false;
     // Same Init() args daArrow_c itself uses for field_0x64c (d_a_arrow.cpp), so the ignition
     // collider's Stts still correctly identifies the arrow as its owning actor - it just doesn't
     // share field_0x688's hit-dedup/apid bookkeeping (see igniteStts's declaration above).
@@ -908,15 +912,15 @@ static bool fireArrowBossLightSlotIsFree() {
 
 // Picks which currently-lit fire arrow should give up its BossLight slot when the pool is full
 // and i_requester needs one. Only ever considers other tracked arrows that are themselves
-// currently holding a slot (bossLightActive) and haven't already been despawned - this can never
-// pick an unrelated vanilla fixture (those aren't tracked here at all, so they're never touched)
-// and can never pick the same slot twice. Returns NULL if i_requester is itself the only (or
-// oldest) claimant, which simply means this particular arrow doesn't get a slot yet either, the
-// same as before this eviction logic existed.
+// currently holding a slot (bossLightActive) and haven't already given that slot up - this can
+// never pick an unrelated vanilla fixture (those aren't tracked here at all, so they're never
+// touched) and can never pick the same slot twice. Returns NULL if i_requester is itself the only
+// (or oldest) claimant, which simply means this particular arrow doesn't get a slot yet either,
+// the same as before this eviction logic existed.
 static TrackedFireArrow* findOldestFireArrowEffect(const TrackedFireArrow* i_requester) {
     TrackedFireArrow* oldest = NULL;
     for (TrackedFireArrow& slot : g_fireArrows) {
-        if (&slot == i_requester || !slot.bossLightActive || slot.effectDespawned) {
+        if (&slot == i_requester || !slot.bossLightActive || slot.bossLightGivenUp) {
             continue;
         }
         if (oldest == NULL || slot.age < oldest->age) {
@@ -926,30 +930,25 @@ static TrackedFireArrow* findOldestFireArrowEffect(const TrackedFireArrow* i_req
     return oldest;
 }
 
-// Shuts off a tracked arrow's entire cosmetic flame/light trio (trail + glow particles, the
-// actor/Link-only plight, and its claim on the BossLight terrain-light pool), to make room for a
-// newer arrow's own effect once the shared pool is full - see findOldestFireArrowEffect and its
-// call site in updateFireArrowEffect below. The arrow itself is completely untouched: it keeps
-// flying, embedding, and igniting flammable objects/enemies exactly as before, since none of that
-// goes through this slot's cosmetic state.
+// Gives up a tracked arrow's claim on the BossLight terrain-light pool, to make room for a newer
+// arrow's own claim once the shared pool is full - see findOldestFireArrowEffect and its call site
+// in updateFireArrowEffect below. Everything else about this slot's effect - the trail/glow
+// particles, the actor/Link-only plight, and the arrow itself (which keeps flying, embedding, and
+// igniting flammable objects/enemies exactly as before) - is left completely untouched; losing a
+// terrain light to the pool's hard 5-slot cap shouldn't also snuff out the arrow's own visible
+// flame, the same way a candle or torch that momentarily loses its own BossLight slot to something
+// closer to the camera doesn't stop looking lit.
 //
-// dKy_plight_cut() is called immediately, the same explicit release initFireArrowSlot/
-// updateFireArrows already use elsewhere, since plight registrations (unlike BossLight's
-// every-frame-reissue model) persist until explicitly cut. The trail/glow particles and the
-// BossLight terrain light have no equivalent "cut now" API; they're simply never re-issued again
-// (effectDespawned short-circuits that whole block in updateFireArrowEffect from here on), which
-// is already this file's established way of letting a continuously-reissued effect end on its own
-// (see igniteBurningActor's own comment above for the same pattern) - the BossLight slot this
-// frees up won't actually read as free until the engine's own next-frame clear in exeKankyo(), so
-// the requester that triggered this eviction still won't get a slot itself this exact frame, only
-// starting next frame.
+// The BossLight terrain light itself has no "cut now" API; it's simply never re-issued again from
+// here on (bossLightGivenUp short-circuits the re-acquisition attempt in updateFireArrowEffect),
+// which is already this file's established way of letting a continuously-reissued effect end on
+// its own (see igniteBurningActor's own comment above for the same pattern) - the BossLight slot
+// this frees up won't actually read as free until the engine's own next-frame clear in exeKankyo(),
+// so the requester that triggered this eviction still won't get a slot itself this exact frame,
+// only starting next frame.
 static void despawnFireArrowEffect(TrackedFireArrow& slot) {
-    if (slot.lightActive) {
-        dKy_plight_cut(&slot.light);
-        slot.lightActive = false;
-    }
     slot.bossLightActive = false;
-    slot.effectDespawned = true;
+    slot.bossLightGivenUp = true;
 }
 
 // Also re-anchors the ignition collider (see l_igniteSphSrc above) to the arrow's current
@@ -958,105 +957,107 @@ static void despawnFireArrowEffect(TrackedFireArrow& slot) {
 static void updateFireArrowEffect(daArrow_c* arrow) {
     for (TrackedFireArrow& slot : g_fireArrows) {
         if (slot.arrow == arrow) {
-            // Skipped entirely once this slot's cosmetic effect has been deliberately despawned to
-            // free up a BossLight pool slot for a newer arrow (see despawnFireArrowEffect above) -
-            // the arrow keeps flying/embedding/igniting things normally either way, only its own
-            // flame/light/terrain-light trio stops being re-issued from here on.
-            if (!slot.effectDespawned) {
-                // arrow->current.pos is the arrow's *held* origin - while nocked, that's the bow's
-                // grip/nock matrix (daAlink_c::getLeftItemMatrix(), see setKeepMatrix()), well behind
-                // the arrowhead, which is why the flame used to show at the bowstring instead. Bomb
-                // Arrows already solve exactly this for their fuse effect (setSmokePos(), which
-                // transforms a fixed near-tip offset by the arrow model's current base matrix rather
-                // than using current.pos), so reuse that same helper and its output (field_0x9cc) to
-                // put our own flame in the same visual spot, correctly tracking the tip whether the
-                // arrow is nocked, flying, or stuck. field_0x9cc/mSmokePos are otherwise only written
-                // by mArrowType==1 (Bomb Arrow) code, which the fire-arrow combo never applies to, so
-                // repurposing them here for a plain arrow doesn't collide with anything.
-                arrow->setSmokePos();
+            // arrow->current.pos is the arrow's *held* origin - while nocked, that's the bow's
+            // grip/nock matrix (daAlink_c::getLeftItemMatrix(), see setKeepMatrix()), well behind
+            // the arrowhead, which is why the flame used to show at the bowstring instead. Bomb
+            // Arrows already solve exactly this for their fuse effect (setSmokePos(), which
+            // transforms a fixed near-tip offset by the arrow model's current base matrix rather
+            // than using current.pos), so reuse that same helper and its output (field_0x9cc) to
+            // put our own flame in the same visual spot, correctly tracking the tip whether the
+            // arrow is nocked, flying, or stuck. field_0x9cc/mSmokePos are otherwise only written
+            // by mArrowType==1 (Bomb Arrow) code, which the fire-arrow combo never applies to, so
+            // repurposing them here for a plain arrow doesn't collide with anything.
+            arrow->setSmokePos();
 
-                // While the arrow is nocked/waiting or has come to rest (stuck in a wall or an
-                // actor), it isn't actually moving frame-to-frame even though arrow->speed may still
-                // hold a stale, nonzero pre-impact (or never-set, pre-shot) value. Feeding that stale
-                // vector to the trace callback would otherwise keep dragging already-emitted trail
-                // particles forward indefinitely, e.g. straight through and out the other side of
-                // whatever the arrow just stuck into. Zero it out in those cases instead, so the
-                // trail settles into a small, stationary flame at the arrowhead.
-                slot.velocity = isArrowStationary(arrow) ? cXyz(0.0f, 0.0f, 0.0f) : arrow->speed;
-                slot.particleKey =
-                    dComIfGp_particle_set(slot.particleKey, ID_ZF_J_FIRE02_FIRE,
-                                          &arrow->field_0x9cc, &arrow->shape_angle, NULL);
+            // While the arrow is nocked/waiting or has come to rest (stuck in a wall or an
+            // actor), it isn't actually moving frame-to-frame even though arrow->speed may still
+            // hold a stale, nonzero pre-impact (or never-set, pre-shot) value. Feeding that stale
+            // vector to the trace callback would otherwise keep dragging already-emitted trail
+            // particles forward indefinitely, e.g. straight through and out the other side of
+            // whatever the arrow just stuck into. Zero it out in those cases instead, so the
+            // trail settles into a small, stationary flame at the arrowhead.
+            slot.velocity = isArrowStationary(arrow) ? cXyz(0.0f, 0.0f, 0.0f) : arrow->speed;
+            slot.particleKey =
+                dComIfGp_particle_set(slot.particleKey, ID_ZF_J_FIRE02_FIRE,
+                                      &arrow->field_0x9cc, &arrow->shape_angle, NULL);
 
-                JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(slot.particleKey);
-                f32 scale = arrow->mProcFunc == &daArrow_c::procWait ? NOCKED_FLAME_SCALE : 1.0f;
-                if (emitter != NULL) {
-                    emitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
-                    emitter->setUserWork((uintptr_t)&slot.velocity);
-                    // setGlobalParticleScale only shrinks each already-spawned particle's rendered
-                    // billboard size (mGlobalPScl) - it leaves the emitter's own spawn volume
-                    // (mGlobalScl, the dynamics scale baked into its world matrix in
-                    // JPAResource.cpp/calcEmitterGlobalPosition) untouched, so at NOCKED_FLAME_SCALE
-                    // particles still spawn spread across the resource's full torch-sized volume,
-                    // just rendered as smaller sprites - visually a diffuse cloud no longer centered
-                    // tightly on field_0x9cc/the point light below. setGlobalScale() scales both the
-                    // spawn volume and the particle size together, keeping the flame compact and
-                    // centered on the same point the light uses at any scale.
-                    emitter->setGlobalScale(JGeometry::TVec3<f32>(scale, scale, scale));
-                }
+            JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(slot.particleKey);
+            f32 scale = arrow->mProcFunc == &daArrow_c::procWait ? NOCKED_FLAME_SCALE : 1.0f;
+            if (emitter != NULL) {
+                emitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
+                emitter->setUserWork((uintptr_t)&slot.velocity);
+                // setGlobalParticleScale only shrinks each already-spawned particle's rendered
+                // billboard size (mGlobalPScl) - it leaves the emitter's own spawn volume
+                // (mGlobalScl, the dynamics scale baked into its world matrix in
+                // JPAResource.cpp/calcEmitterGlobalPosition) untouched, so at NOCKED_FLAME_SCALE
+                // particles still spawn spread across the resource's full torch-sized volume,
+                // just rendered as smaller sprites - visually a diffuse cloud no longer centered
+                // tightly on field_0x9cc/the point light below. setGlobalScale() scales both the
+                // spawn volume and the particle size together, keeping the flame compact and
+                // centered on the same point the light uses at any scale.
+                emitter->setGlobalScale(JGeometry::TVec3<f32>(scale, scale, scale));
+            }
 
-                // The actual visible "illumination" - see GLOW_SCALE_FACTOR/NOCKED_FLAME_SCALE above
-                // for why it's scaled down from its authored (torch-sized) look, and the comment on
-                // ID_ZF_J_FIRE02_FIRE above for why the point light below isn't enough on its own.
-                slot.glowParticleKey =
-                    dComIfGp_particle_set(slot.glowParticleKey, ID_ZF_J_FIRE00_GLOW,
-                                          &arrow->field_0x9cc, &arrow->shape_angle, NULL);
+            // The actual visible "illumination" - see GLOW_SCALE_FACTOR/NOCKED_FLAME_SCALE above
+            // for why it's scaled down from its authored (torch-sized) look, and the comment on
+            // ID_ZF_J_FIRE02_FIRE above for why the point light below isn't enough on its own.
+            slot.glowParticleKey =
+                dComIfGp_particle_set(slot.glowParticleKey, ID_ZF_J_FIRE00_GLOW,
+                                      &arrow->field_0x9cc, &arrow->shape_angle, NULL);
 
-                JPABaseEmitter* glowEmitter = dComIfGp_particle_getEmitter(slot.glowParticleKey);
-                if (glowEmitter != NULL) {
-                    glowEmitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
-                    glowEmitter->setUserWork((uintptr_t)&slot.velocity);
-                    // See the FIRE emitter's setGlobalScale comment above - same reasoning applies
-                    // here so the glow halo stays centered on field_0x9cc instead of spreading across
-                    // its full authored (torch-sized) volume while nocked.
-                    f32 glowScale = scale * GLOW_SCALE_FACTOR;
-                    glowEmitter->setGlobalScale(JGeometry::TVec3<f32>(glowScale, glowScale, glowScale));
-                }
+            JPABaseEmitter* glowEmitter = dComIfGp_particle_getEmitter(slot.glowParticleKey);
+            if (glowEmitter != NULL) {
+                glowEmitter->setParticleCallBackPtr(dPa_control_c::getParticleTracePCB());
+                glowEmitter->setUserWork((uintptr_t)&slot.velocity);
+                // See the FIRE emitter's setGlobalScale comment above - same reasoning applies
+                // here so the glow halo stays centered on field_0x9cc instead of spreading across
+                // its full authored (torch-sized) volume while nocked.
+                f32 glowScale = scale * GLOW_SCALE_FACTOR;
+                glowEmitter->setGlobalScale(JGeometry::TVec3<f32>(glowScale, glowScale, glowScale));
+            }
 
-                // Illuminates the arrow's surroundings the same way every other visible flame in the
-                // game does (see FIRE_ARROW_LIGHT_COLOR/FIRE_ARROW_LIGHT_POW above), re-anchored to the
-                // same tip position as the trail particle above. Registered once lazily (the first
-                // frame the arrow's flame actually shows, whether nocked or already flying) rather
-                // than at trackFireArrow() time, so a light never ends up registered for an arrow that
-                // was tracked but never actually got this far (there's no such path today, but this
-                // keeps the lazy-init pattern consistent with the particle key above, which is also
-                // only ever actually assigned here).
-                slot.light.mPosition = arrow->field_0x9cc;
-                if (!slot.lightActive) {
-                    slot.light.mColor = FIRE_ARROW_LIGHT_COLOR;
-                    slot.light.mPow = FIRE_ARROW_LIGHT_POW;
-                    slot.light.mFluctuation = FIRE_ARROW_LIGHT_FLUCTUATION;
-                    dKy_plight_set(&slot.light);
-                    slot.lightActive = true;
-                }
+            // Illuminates the arrow's surroundings the same way every other visible flame in the
+            // game does (see FIRE_ARROW_LIGHT_COLOR/FIRE_ARROW_LIGHT_POW above), re-anchored to the
+            // same tip position as the trail particle above. Registered once lazily (the first
+            // frame the arrow's flame actually shows, whether nocked or already flying) rather
+            // than at trackFireArrow() time, so a light never ends up registered for an arrow that
+            // was tracked but never actually got this far (there's no such path today, but this
+            // keeps the lazy-init pattern consistent with the particle key above, which is also
+            // only ever actually assigned here). Kept running unconditionally, independent of
+            // whether this slot still holds (or ever held, or has since given up) a BossLight
+            // terrain-light slot below - the flame/glow/plight trio is this arrow's own cosmetic
+            // effect and shouldn't disappear just because the shared BossLight pool is full.
+            slot.light.mPosition = arrow->field_0x9cc;
+            if (!slot.lightActive) {
+                slot.light.mColor = FIRE_ARROW_LIGHT_COLOR;
+                slot.light.mPow = FIRE_ARROW_LIGHT_POW;
+                slot.light.mFluctuation = FIRE_ARROW_LIGHT_FLUCTUATION;
+                dKy_plight_set(&slot.light);
+                slot.lightActive = true;
+            }
 
-                // See FIRE_ARROW_BOSSLIGHT_COLOR/FIRE_ARROW_BOSSLIGHT_REF_DIST above - this is the
-                // actual mechanism (shared with every vanilla fire fixture and the Lantern itself)
-                // that visibly brightens nearby terrain, as a companion to the plight above. Must be
-                // re-issued every frame (unlike dKy_plight_set's register-once pattern), since the
-                // engine clears this slot array itself each frame before any of this frame's callers
-                // get a chance to re-claim it. Only claimed when a slot is actually free (see
-                // fireArrowBossLightSlotIsFree above) so an arrow's own terrain light never evicts an
-                // already-lit vanilla fixture (or another arrow's) out of the shared, fixed-size pool.
-                // If it isn't free, rather than simply giving up for this arrow, look for another fire
-                // arrow's own effect to despawn instead (see findOldestFireArrowEffect/
-                // despawnFireArrowEffect above) - never a vanilla fixture's, since those were never
-                // tracked here to begin with. That frees a slot starting next frame, not this one (see
-                // despawnFireArrowEffect's own comment on why), so this arrow still doesn't get a
-                // terrain light of its own this exact frame either way.
+            // See FIRE_ARROW_BOSSLIGHT_COLOR/FIRE_ARROW_BOSSLIGHT_REF_DIST above - this is the
+            // actual mechanism (shared with every vanilla fire fixture and the Lantern itself)
+            // that visibly brightens nearby terrain, as a companion to the plight above. Must be
+            // re-issued every frame (unlike dKy_plight_set's register-once pattern), since the
+            // engine clears this slot array itself each frame before any of this frame's callers
+            // get a chance to re-claim it. Only claimed when a slot is actually free (see
+            // fireArrowBossLightSlotIsFree above) so an arrow's own terrain light never evicts an
+            // already-lit vanilla fixture (or another arrow's) out of the shared, fixed-size pool.
+            // If it isn't free, rather than simply giving up for this arrow, look for another fire
+            // arrow's own BossLight claim to give up instead (see findOldestFireArrowEffect/
+            // despawnFireArrowEffect above) - never a vanilla fixture's, since those were never
+            // tracked here to begin with. That frees a slot starting next frame, not this one (see
+            // despawnFireArrowEffect's own comment on why), so this arrow still doesn't get a
+            // terrain light of its own this exact frame either way. Skipped entirely once this
+            // slot has itself already given up its own BossLight claim (see bossLightGivenUp's own
+            // comment above) - the flame/glow/plight above keeps running regardless, only this
+            // slot's pursuit of a terrain light stops for good.
+            if (!slot.bossLightGivenUp) {
                 if (fireArrowBossLightSlotIsFree()) {
                     GXColor bossLightColor = FIRE_ARROW_BOSSLIGHT_COLOR;
-                    dKy_BossLight_set(&arrow->field_0x9cc, &bossLightColor, FIRE_ARROW_BOSSLIGHT_REF_DIST,
-                                       0);
+                    dKy_BossLight_set(&arrow->field_0x9cc, &bossLightColor,
+                                       FIRE_ARROW_BOSSLIGHT_REF_DIST, 0);
                     slot.bossLightActive = true;
                 } else {
                     TrackedFireArrow* oldest = findOldestFireArrowEffect(&slot);
