@@ -14,6 +14,7 @@
 #include "d/d_kankyo.h"
 #include "d/d_menu_ring.h"
 #include "d/d_meter2_draw.h"
+#include "d/d_particle.h"
 #include "d/d_particle_name.h"
 #include "d/d_save.h"
 #include "f_op/f_op_actor_mng.h"
@@ -46,6 +47,14 @@ DEFINE_HOOK(&dMeter2Draw_c::drawKanteraMeter, DrawKanteraMeter);
 DEFINE_HOOK(&daAlink_c::changeArrowType, ChangeArrowType);
 
 DEFINE_HOOK(&daAlink_c::setBowReadyAnime, SetBowReadyAnime);
+
+// Diagnostic-only hooks used to investigate the "hit flash" terrain light (dKy_SordFlush_set),
+// which appears to illuminate terrain independently of dKy_BossLight_set's 5-slot pool. These log
+// every occurrence so the real in-game trigger conditions can be confirmed; they do not alter
+// gameplay.
+DEFINE_HOOK(&dPa_control_c::setHitMark, SetHitMark);
+
+DEFINE_HOOK(&dKy_SordFlush_set, SordFlushSet);
 
 static u8 g_disguisedItemSlot = NO_MIX_ITEM;
 
@@ -562,6 +571,34 @@ static void on_arrow_execute_post(ModContext*, void* args, void*, void*) {
     }
 }
 
+static HookAction on_set_hit_mark_pre(ModContext*, void* args, void*, void*) {
+    u16 hitmark = mods::arg<u16>(args, 1);
+    fopAc_ac_c* actor = mods::arg<fopAc_ac_c*>(args, 2);
+    u32 atType = mods::arg<u32>(args, 6);
+
+    if (actor != NULL) {
+        mods::log::info(
+            "setHitMark: hitmark={} atType={:#x} actorName={:#x} health={} "
+            "status0x10000={}",
+            hitmark, atType, fopAcM_GetName(actor), actor->health,
+            fopAcM_CheckStatus(actor, fopAcStts_UNK_0x10000_e) != 0 ? 1 : 0);
+    } else {
+        mods::log::info("setHitMark: hitmark={} atType={:#x} actor=null", hitmark, atType);
+    }
+
+    return HOOK_CONTINUE;
+}
+
+static HookAction on_sord_flush_set_pre(ModContext*, void* args, void*, void*) {
+    cXyz pos = mods::arg<cXyz>(args, 0);
+    int lightType = mods::arg<int>(args, 1);
+
+    mods::log::info("dKy_SordFlush_set: pos=({}, {}, {}) light_type={}", pos.x, pos.y, pos.z,
+                     lightType);
+
+    return HOOK_CONTINUE;
+}
+
 extern "C" {
 MOD_EXPORT ModResult mod_initialize(ModError*) {
     ModResult result = mods::hook::add_pre<SetMixItem>(on_set_mix_item_pre, &kDisguiseHookOptions);
@@ -646,6 +683,18 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     result = mods::hook::add_pre<SetBowReadyAnime>(on_set_bow_ready_anime_pre);
     if (result != MOD_OK) {
         mods::log::error("failed to install pre hook on_set_bow_ready_anime_pre");
+        return result;
+    }
+
+    result = mods::hook::add_pre<SetHitMark>(on_set_hit_mark_pre);
+    if (result != MOD_OK) {
+        mods::log::error("failed to install pre hook on_set_hit_mark_pre");
+        return result;
+    }
+
+    result = mods::hook::add_pre<SordFlushSet>(on_sord_flush_set_pre);
+    if (result != MOD_OK) {
+        mods::log::error("failed to install pre hook on_sord_flush_set_pre");
         return result;
     }
 
