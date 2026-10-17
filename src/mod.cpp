@@ -535,7 +535,7 @@ static HookAction on_arrow_shooting_pre(ModContext*, void* args, void*, void*) {
 
     daAlink_c* link = daAlink_getAlinkActorClass();
     if (link == nullptr || !checkBowLanternCombo() || !g_fireArrowModeOn ||
-        dComIfGs_getOil() == 0)
+        dComIfGs_getOil() == 0 || arrow->mArrowType != daArrow_c::ARROW_TYPE_NORMAL)
     {
         return HOOK_CONTINUE;
     }
@@ -565,6 +565,10 @@ static void on_alink_make_arrow_post(ModContext*, void* args, void*, void*) {
     }
 
     daArrow_c* arrow = static_cast<daArrow_c*>(actor);
+    if (arrow->mArrowType != daArrow_c::ARROW_TYPE_NORMAL) {
+        return;
+    }
+
     arrow->field_0x688.SetAtMtrl(dCcD_MTRL_FIRE);
     trackFireArrow(arrow);
 }
