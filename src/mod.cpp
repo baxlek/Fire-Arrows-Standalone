@@ -1,6 +1,8 @@
 #include "mods/service.hpp"
+#include "mods/svc/config.h"
 #include "mods/svc/hook.hpp"
 #include "mods/svc/log.hpp"
+#include "mods/svc/ui.h"
 
 #include <cstring>
 
@@ -23,6 +25,16 @@ DEFINE_MOD();
 
 IMPORT_SERVICE(HookService, svc_hook);
 IMPORT_SERVICE(LogService, svc_log);
+IMPORT_SERVICE(ConfigService, svc_config);
+IMPORT_SERVICE(UiService, svc_ui);
+
+static ConfigVarHandle g_terrainLightingVar = 0;
+
+static bool terrainLightingEnabled() {
+    bool enabled = true;
+    svc_config->get_bool(mod_ctx, g_terrainLightingVar, &enabled);
+    return enabled;
+}
 
 static constexpr u8 NO_MIX_ITEM = 0xFF;
 
@@ -466,7 +478,9 @@ static void updateFireArrowEffect(daArrow_c* arrow) {
                 slot.lightActive = true;
             }
 
-            if (!slot.bossLightGivenUp) {
+            if (!terrainLightingEnabled()) {
+                slot.bossLightActive = false;
+            } else if (!slot.bossLightGivenUp) {
                 if (fireArrowBossLightSlotIsFree()) {
                     GXColor bossLightColor = FIRE_ARROW_BOSSLIGHT_COLOR;
                     dKy_BossLight_set(&arrow->field_0x9cc, &bossLightColor,
@@ -562,8 +576,39 @@ static void on_arrow_execute_post(ModContext*, void* args, void*, void*) {
     }
 }
 
+static ModResult buildFireArrowsModsPanel(
+    ModContext*, UiElementHandle panel, void*, ModError*) {
+    UiControlDesc terrainLightingControl = UI_CONTROL_DESC_INIT;
+    terrainLightingControl.kind = UI_CONTROL_TOGGLE;
+    terrainLightingControl.label = "Terrain Lighting";
+    terrainLightingControl.help_rml =
+        "Whether fire arrows cast dynamic light onto nearby terrain.";
+    terrainLightingControl.binding = UI_BINDING_CONFIG_VAR;
+    terrainLightingControl.config_var = g_terrainLightingVar;
+    return svc_ui->pane_add_control(mod_ctx, panel, &terrainLightingControl, nullptr);
+}
+
 extern "C" {
 MOD_EXPORT ModResult mod_initialize(ModError*) {
+    ConfigVarDesc terrainLightingDesc = CONFIG_VAR_DESC_INIT;
+    terrainLightingDesc.name = "terrainLighting";
+    terrainLightingDesc.type = CONFIG_VAR_BOOL;
+    terrainLightingDesc.default_bool = true;
+    ModResult configResult =
+        svc_config->register_var(mod_ctx, &terrainLightingDesc, &g_terrainLightingVar);
+    if (configResult != MOD_OK) {
+        mods::log::error("failed to register terrainLighting config var");
+        return configResult;
+    }
+
+    UiModsPanelDesc panelDesc = UI_MODS_PANEL_DESC_INIT;
+    panelDesc.build = buildFireArrowsModsPanel;
+    configResult = svc_ui->register_mods_panel(mod_ctx, &panelDesc);
+    if (configResult != MOD_OK) {
+        mods::log::error("failed to register fire_arrows mods panel");
+        return configResult;
+    }
+
     ModResult result = mods::hook::add_pre<SetMixItem>(on_set_mix_item_pre, &kDisguiseHookOptions);
     if (result != MOD_OK) {
         mods::log::error("failed to install pre hook on_set_mix_item_pre");
