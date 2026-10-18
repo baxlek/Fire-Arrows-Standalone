@@ -302,7 +302,16 @@ struct BurningActor {
     u32 particleKeyB = 0;
     cXyz velocity = {0.0f, 0.0f, 0.0f};
     s16 timer = 0;
+    LIGHT_INFLUENCE light;
+    bool lightActive = false;
 };
+
+static void cutBurningActorLight(BurningActor& slot) {
+    if (slot.lightActive) {
+        dKy_plight_cut(&slot.light);
+        slot.lightActive = false;
+    }
+}
 
 static constexpr int MAX_BURNING_ACTORS = 8;
 static BurningActor g_burningActors[MAX_BURNING_ACTORS];
@@ -342,6 +351,7 @@ static void igniteBurningActor(fopAc_ac_c* actor) {
 
     BurningActor& slot = g_burningActors[g_nextBurningActorSlot];
     g_nextBurningActorSlot = (g_nextBurningActorSlot + 1) % MAX_BURNING_ACTORS;
+    cutBurningActorLight(slot);
     slot.actorId = id;
     slot.particleKeyA = 0;
     slot.particleKeyB = 0;
@@ -356,6 +366,7 @@ static void updateBurningActors() {
 
         fopAc_ac_c* actor = fopAcM_SearchByID(slot.actorId);
         if (actor == NULL) {
+            cutBurningActorLight(slot);
             slot.actorId = fpcM_ERROR_PROCESS_ID_e;
             slot.timer = 0;
             continue;
@@ -388,7 +399,17 @@ static void updateBurningActors() {
             }
         }
 
+        slot.light.mPosition = pos;
+        if (!slot.lightActive) {
+            slot.light.mColor = FIRE_ARROW_LIGHT_COLOR;
+            slot.light.mPow = FIRE_ARROW_LIGHT_POW;
+            slot.light.mFluctuation = FIRE_ARROW_LIGHT_FLUCTUATION;
+            dKy_plight_set(&slot.light);
+            slot.lightActive = true;
+        }
+
         if (slot.timer == 0) {
+            cutBurningActorLight(slot);
             slot.actorId = fpcM_ERROR_PROCESS_ID_e;
         }
     }
